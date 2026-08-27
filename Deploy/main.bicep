@@ -1,4 +1,5 @@
 @description('Base name used to derive resource names')
+@maxLength(10)
 param baseName string = 'statsecure'
 
 @description('Azure region')
@@ -17,12 +18,13 @@ param allowedOrigin string
 param sentinelWorkspaceResourceId string
 
 var funcAppName = '${baseName}-func'
-var storageAccountName = toLower('${baseName}sa${uniqueString(resourceGroup().id)}')
+// Storage names are globally unique, lowercase alphanumeric, and max 24 chars.
+// 10-char baseName + 2-char "sa" + 12-char unique suffix = 24 chars.
+var storageAccountName = toLower('${baseName}sa${take(uniqueString(resourceGroup().id), 12)}')
 var appInsightsName = '${baseName}-ai'
 var keyVaultName = '${baseName}-kv-${uniqueString(resourceGroup().id)}'
 var planName = '${baseName}-plan'
 
-// --- Storage account: required by Functions runtime. No public blob access. ---
 resource storage 'Microsoft.Storage/storageAccounts@2023-01-01' = {
   name: storageAccountName
   location: location
@@ -52,10 +54,9 @@ resource appInsights 'Microsoft.Insights/components@2020-02-02' = {
 resource plan 'Microsoft.Web/serverfarms@2023-01-01' = {
   name: planName
   location: location
-  sku: { name: 'EP1', tier: 'ElasticPremium' }  // Elastic Premium: supports VNet integration/private endpoints, unlike Consumption
+  sku: { name: 'EP1', tier: 'ElasticPremium' }
 }
 
-// --- Key Vault: RBAC authorization only. No access policies, no vault-wide secret list rights. ---
 resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
   name: keyVaultName
   location: location
@@ -72,7 +73,6 @@ resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
   }
 }
 
-// --- Function App: system-assigned managed identity, HTTPS-only, TLS 1.2, Easy Auth, locked CORS. ---
 resource functionApp 'Microsoft.Web/sites@2023-01-01' = {
   name: funcAppName
   location: location
@@ -104,7 +104,6 @@ resource functionApp 'Microsoft.Web/sites@2023-01-01' = {
   }
 }
 
-// --- Easy Auth: require an authenticated Entra ID caller (the Logic Apps managed identity / APIM). ---
 resource authSettings 'Microsoft.Web/sites/config@2023-01-01' = {
   parent: functionApp
   name: 'authsettingsV2'
@@ -128,8 +127,6 @@ resource authSettings 'Microsoft.Web/sites/config@2023-01-01' = {
   }
 }
 
-// --- RBAC: grant the Function App's managed identity ONLY "Key Vault Secrets User" (read secrets),
-//     never Key Vault Administrator/Contributor. Least privilege for the identity itself.
 var keyVaultSecretsUserRoleId = '4633458b-17de-408a-b874-0445c86b69e6'
 
 resource kvSecretsUserAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
@@ -142,7 +139,6 @@ resource kvSecretsUserAssignment 'Microsoft.Authorization/roleAssignments@2022-0
   }
 }
 
-// --- RBAC: grant read access to the Sentinel Log Analytics workspace only, not the workspace's resource group. ---
 var logAnalyticsReaderRoleId = '73c42c96-874c-492b-b04d-ab87d138a8bb'
 
 resource lawReaderAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
@@ -158,13 +154,3 @@ resource lawReaderAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01
 output functionAppName string = functionApp.name
 output functionAppPrincipalId string = functionApp.identity.principalId
 output keyVaultName string = keyVault.name
-
-// NOTE: Microsoft Graph application permissions (IdentityRiskyUser.Read.All, Machine.Read.All,
-// MailboxSettings.Read, AuditLog.Read.All - used by AADRiskModule, MDEModule, OutOfOfficeModule)
-// cannot be granted via an ARM/Bicep role assignment; Graph app role assignments require the
-// Microsoft Graph resource service principal's app role IDs and are typically granted via
-// Deploy/GrantGraphPermissions.ps1 (run once, post-deployment, by a Global/Privileged Role
-// Administrator) rather than embedded here. Keeping that step as an explicit, audited,
-// human-run script - rather than folding it into this template - is intentional: it ensures
-// a person with the right privilege reviews exactly which Graph scopes are being granted to
-// this identity before they're granted.
