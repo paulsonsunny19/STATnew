@@ -1,0 +1,13 @@
+{
+  "name": "RunPlaybookModule",
+  "description": "Triggers another Sentinel/Logic Apps playbook by a pre-registered logical name, passing through the current incident context.",
+  "requiredPermissions": {
+    "logAnalytics": [],
+    "keyVaultSecrets": [],
+    "graph": [],
+    "azureRbac": ["Logic App Contributor scoped ONLY to the specific playbook resource IDs in PlaybookAllowList.psd1, not the resource group"]
+  },
+  "inputEntityTypes": [],
+  "maxEntitiesPerCall": 0,
+  "securityDeviationFromOriginal": "This is the highest-impact module in STAT: it can cause another automation to run, potentially including remediation actions (disabling accounts, isolating devices, blocking IPs). The original design accepts a target playbook resource ID or callback URL directly from the caller, meaning anything that can reach this endpoint can invoke ANY Logic App the Function App's identity has rights to trigger - a serious lateral-movement / blast-radius risk if the calling Logic App or its inputs are ever compromised. This reimplementation requires callers to specify a pre-registered logical playbook name (see PlaybookAllowList.psd1); the actual resource ID and trigger URL are resolved server-side from deploy-time configuration and never accepted from the request body. Adding a new invokable playbook requires a code change and redeploy, which is the correct amount of friction for a capability this powerful."
+}

@@ -1,0 +1,164 @@
+{
+  "swagger": "2.0",
+  "info": {
+    "title": "STAT-Secure Connector",
+    "description": "Security-hardened Sentinel triage automation connector. All calls require an Entra ID bearer token issued for this API's app registration.",
+    "version": "1.0.0"
+  },
+  "host": "REPLACE_WITH_FUNCTION_APP_HOSTNAME",
+  "basePath": "/api",
+  "schemes": ["https"],
+  "consumes": ["application/json"],
+  "produces": ["application/json"],
+  "securityDefinitions": {
+    "oauth2-aad": {
+      "type": "oauth2",
+      "flow": "accessCode",
+      "authorizationUrl": "https://login.microsoftonline.com/common/oauth2/authorize",
+      "tokenUrl": "https://login.microsoftonline.com/common/oauth2/token",
+      "scopes": {}
+    }
+  },
+  "security": [{ "oauth2-aad": [] }],
+  "paths": {
+    "/BaseModule": {
+      "post": {
+        "summary": "Normalize and validate incident/entity data",
+        "operationId": "BaseModule",
+        "parameters": [
+          {
+            "name": "body",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "type": "object",
+              "required": ["IncidentARMId"],
+              "properties": {
+                "IncidentARMId": { "type": "string" },
+                "Entities": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "Type": { "type": "string" },
+                      "Value": { "type": "string" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ],
+        "responses": {
+          "200": { "description": "Normalized context" },
+          "400": { "description": "Validation failed" },
+          "403": { "description": "Origin not allowed" }
+        }
+      }
+    },
+    "/Modules/IPReputation": {
+      "post": {
+        "summary": "Look up reputation and internal activity for IP entities",
+        "operationId": "IPReputationModule",
+        "parameters": [{ "name": "body", "in": "body", "required": true, "schema": { "type": "object" } }],
+        "responses": { "200": { "description": "Reputation results" }, "400": { "description": "Validation failed" } }
+      }
+    },
+    "/Modules/AADRisk": {
+      "post": {
+        "summary": "Retrieve Entra ID Identity Protection risk for account entities",
+        "operationId": "AADRiskModule",
+        "parameters": [{ "name": "body", "in": "body", "required": true, "schema": { "type": "object" } }],
+        "responses": { "200": { "description": "Risk results" }, "400": { "description": "Validation failed" } }
+      }
+    },
+    "/Modules/FileInsights": {
+      "post": {
+        "summary": "Check filehash entities as email attachments and run FileProfile()",
+        "operationId": "FileInsightsModule",
+        "parameters": [{ "name": "body", "in": "body", "required": true, "schema": { "type": "object" } }],
+        "responses": { "200": { "description": "File insight results" }, "400": { "description": "Validation failed" } }
+      }
+    },
+    "/Modules/KQL": {
+      "post": {
+        "summary": "Run a named, pre-approved KQL query template with entity values bound as parameters",
+        "operationId": "KQLModule",
+        "parameters": [{ "name": "body", "in": "body", "required": true, "schema": { "type": "object", "required": ["QueryTemplateName"] } }],
+        "responses": { "200": { "description": "Query results" }, "400": { "description": "Unknown template or validation failed" } }
+      }
+    },
+    "/Modules/MCAS": {
+      "post": {
+        "summary": "Get Defender for Cloud Apps investigation priority score for account entities",
+        "operationId": "MCASModule",
+        "parameters": [{ "name": "body", "in": "body", "required": true, "schema": { "type": "object" } }],
+        "responses": { "200": { "description": "MCAS results" }, "400": { "description": "Validation failed" } }
+      }
+    },
+    "/Modules/MDE": {
+      "post": {
+        "summary": "Get Defender for Endpoint risk score/exposure level for correlated devices",
+        "operationId": "MDEModule",
+        "parameters": [{ "name": "body", "in": "body", "required": true, "schema": { "type": "object" } }],
+        "responses": { "200": { "description": "MDE results" }, "400": { "description": "Validation failed" } }
+      }
+    },
+    "/Modules/OutOfOffice": {
+      "post": {
+        "summary": "Determine if account entities have Out of Office set",
+        "operationId": "OutOfOfficeModule",
+        "parameters": [{ "name": "body", "in": "body", "required": true, "schema": { "type": "object" } }],
+        "responses": { "200": { "description": "Out of office results" }, "400": { "description": "Validation failed" } }
+      }
+    },
+    "/Modules/RelatedAlerts": {
+      "post": {
+        "summary": "Find other Sentinel alerts referencing the same entities",
+        "operationId": "RelatedAlertsModule",
+        "parameters": [{ "name": "body", "in": "body", "required": true, "schema": { "type": "object" } }],
+        "responses": { "200": { "description": "Related alert results" }, "400": { "description": "Validation failed" } }
+      }
+    },
+    "/Modules/ThreatIntel": {
+      "post": {
+        "summary": "Cross-reference entities against ThreatIntelligenceIndicator",
+        "operationId": "ThreatIntelModule",
+        "parameters": [{ "name": "body", "in": "body", "required": true, "schema": { "type": "object" } }],
+        "responses": { "200": { "description": "Threat intel results" }, "400": { "description": "Validation failed" } }
+      }
+    },
+    "/Modules/UEBA": {
+      "post": {
+        "summary": "Look up account entities in BehaviorAnalytics",
+        "operationId": "UEBAModule",
+        "parameters": [{ "name": "body", "in": "body", "required": true, "schema": { "type": "object" } }],
+        "responses": { "200": { "description": "UEBA results" }, "400": { "description": "Validation failed" } }
+      }
+    },
+    "/Modules/Watchlist": {
+      "post": {
+        "summary": "Compare entities against a named watchlist (supports UPN, IP, and CIDR matching)",
+        "operationId": "WatchlistModule",
+        "parameters": [{ "name": "body", "in": "body", "required": true, "schema": { "type": "object", "required": ["WatchlistAlias"] } }],
+        "responses": { "200": { "description": "Watchlist match results" }, "400": { "description": "Validation failed" } }
+      }
+    },
+    "/Modules/RiskScoring": {
+      "post": {
+        "summary": "Aggregate boolean risk factors from other modules into a relative risk score",
+        "operationId": "RiskScoringModule",
+        "parameters": [{ "name": "body", "in": "body", "required": true, "schema": { "type": "object", "required": ["Factors"] } }],
+        "responses": { "200": { "description": "Score and band" }, "400": { "description": "Validation failed" } }
+      }
+    },
+    "/Modules/RunPlaybook": {
+      "post": {
+        "summary": "Trigger a pre-registered downstream playbook by logical name",
+        "operationId": "RunPlaybookModule",
+        "parameters": [{ "name": "body", "in": "body", "required": true, "schema": { "type": "object", "required": ["PlaybookName"] } }],
+        "responses": { "200": { "description": "Playbook invoked" }, "400": { "description": "Unknown or non-allow-listed playbook" } }
+      }
+    }
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "name": "IPReputationModule",
+  "description": "Looks up reputation for IP entities against SecurityEvent/CommonSecurityLog history and an external threat intel API.",
+  "requiredPermissions": {
+    "logAnalytics": ["Log Analytics Reader on the Sentinel workspace"],
+    "keyVaultSecrets": ["ti-api-key"],
+    "graph": []
+  },
+  "inputEntityTypes": ["ip"],
+  "maxEntitiesPerCall": 20,
+  "notes": "This module does NOT require SecurityInsights write access - it only reads. Do not grant Incident Responder or Contributor roles to run this module."
+}

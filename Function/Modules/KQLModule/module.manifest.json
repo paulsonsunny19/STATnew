@@ -1,0 +1,12 @@
+{
+  "name": "KQLModule",
+  "description": "Runs a pre-approved, named KQL query template against the Sentinel workspace, with entity values bound as parameters.",
+  "requiredPermissions": {
+    "logAnalytics": ["Log Analytics Reader on the Sentinel workspace"],
+    "keyVaultSecrets": [],
+    "graph": []
+  },
+  "inputEntityTypes": ["ip", "host", "account", "filehash"],
+  "maxEntitiesPerCall": 20,
+  "securityDeviationFromOriginal": "The original STAT KQL module accepts an arbitrary free-text KQL query string from the caller. That design lets anyone who can call the Logic App (or anyone who can tamper with the playbook's stored query text) run any KQL against the workspace, including queries unrelated to the incident, wide time-range table scans, or exfiltration of unrelated tables the caller shouldn't see. This reimplementation instead ships a fixed, code-reviewed library of named query templates (see QueryLibrary.psd1); callers select a template by name and supply only entity values, which are bound as parameters and never concatenated into the query text. Add new templates by editing QueryLibrary.psd1 and redeploying, not at runtime."
+}

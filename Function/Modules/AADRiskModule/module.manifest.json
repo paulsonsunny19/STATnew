@@ -1,0 +1,12 @@
+{
+  "name": "AADRiskModule",
+  "description": "Retrieves Entra ID Identity Protection risk level/state, MFA fraud reports, and MFA failures for account entities.",
+  "requiredPermissions": {
+    "logAnalytics": [],
+    "keyVaultSecrets": [],
+    "graph": ["IdentityRiskyUser.Read.All", "AuditLog.Read.All"]
+  },
+  "inputEntityTypes": ["account"],
+  "maxEntitiesPerCall": 20,
+  "notes": "Read-only Graph scopes only. Does not request IdentityRiskyUser.ReadWrite.All - this module never dismisses or confirms risk, only reports it."
+}

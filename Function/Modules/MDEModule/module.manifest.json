@@ -1,0 +1,12 @@
+{
+  "name": "MDEModule",
+  "description": "Returns Defender for Endpoint risk score and exposure level for machines an account logged onto interactively, and for machines matching IP entities.",
+  "requiredPermissions": {
+    "logAnalytics": ["Log Analytics Reader on the Sentinel workspace (for logon correlation)"],
+    "keyVaultSecrets": [],
+    "graph": ["Machine.Read.All"]
+  },
+  "inputEntityTypes": ["account", "ip"],
+  "maxEntitiesPerCall": 20,
+  "notes": "Uses Microsoft Graph Security API (Machine.Read.All) via managed identity, not the legacy MDE-specific API with a separate app secret."
+}

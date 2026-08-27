@@ -1,0 +1,12 @@
+{
+  "name": "UEBAModule",
+  "description": "Looks up account entities in the BehaviorAnalytics table to identify activity that deviates from historical patterns.",
+  "requiredPermissions": {
+    "logAnalytics": ["Log Analytics Reader on the Sentinel workspace"],
+    "keyVaultSecrets": [],
+    "graph": []
+  },
+  "inputEntityTypes": ["account"],
+  "maxEntitiesPerCall": 20,
+  "notes": "Read-only. Investigation priority values are surfaced as-is; this module does not interpret or auto-act on them - that's Risk Scoring's job."
+}

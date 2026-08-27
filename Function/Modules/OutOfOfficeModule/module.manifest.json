@@ -1,0 +1,12 @@
+{
+  "name": "OutOfOfficeModule",
+  "description": "Determines whether an account entity currently has an Out of Office / automatic reply set on their mailbox.",
+  "requiredPermissions": {
+    "logAnalytics": [],
+    "keyVaultSecrets": [],
+    "graph": ["MailboxSettings.Read"]
+  },
+  "inputEntityTypes": ["account"],
+  "maxEntitiesPerCall": 20,
+  "notes": "Read-only mailbox settings scope only - never requests Mail.Read or Mail.ReadWrite, which this module has no need for."
+}

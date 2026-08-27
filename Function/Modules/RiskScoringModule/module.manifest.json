@@ -1,0 +1,12 @@
+{
+  "name": "RiskScoringModule",
+  "description": "Aggregates structured outputs from other STAT modules into a single relative risk score for the calling playbook to act on.",
+  "requiredPermissions": {
+    "logAnalytics": [],
+    "keyVaultSecrets": [],
+    "graph": []
+  },
+  "inputEntityTypes": [],
+  "maxEntitiesPerCall": 0,
+  "notes": "This module makes no external calls at all - it is pure computation over caller-supplied module outputs. Its main security control is strict type/range validation on every scoring input so a malformed or adversarial value from an upstream module response can't corrupt the score or crash the function."
+}

@@ -1,0 +1,12 @@
+{
+  "name": "FileInsightsModule",
+  "description": "Checks whether file-hash entities appear as email attachments and returns FileProfile() enrichment from Advanced Hunting.",
+  "requiredPermissions": {
+    "logAnalytics": ["Log Analytics Reader on the Microsoft 365 Defender-linked workspace"],
+    "keyVaultSecrets": [],
+    "graph": []
+  },
+  "inputEntityTypes": ["filehash"],
+  "maxEntitiesPerCall": 20,
+  "notes": "Hash values are validated against strict hex-length patterns (MD5/SHA1/SHA256) before being bound into KQL - arbitrary strings are rejected outright, not sanitized-and-passed-through."
+}

@@ -1,0 +1,12 @@
+{
+  "name": "RelatedAlertsModule",
+  "description": "Finds other Sentinel alerts referencing the same entities as the current incident, within a configurable lookback window.",
+  "requiredPermissions": {
+    "logAnalytics": ["Log Analytics Reader on the Sentinel workspace"],
+    "keyVaultSecrets": [],
+    "graph": []
+  },
+  "inputEntityTypes": ["ip", "host", "account", "filehash"],
+  "maxEntitiesPerCall": 20,
+  "notes": "Lookback window is clamped server-side to a maximum of 30 days regardless of caller input, to bound query cost."
+}

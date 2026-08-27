@@ -1,0 +1,199 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "PlaybookName": {
+      "type": "string",
+      "defaultValue": "STAT-Secure-Triage"
+    },
+    "STATConnectionName": {
+      "type": "string",
+      "defaultValue": "statsecure-connector",
+      "metadata": { "description": "Name of the Logic Apps API connection resource pointing at the STAT-Secure custom connector." }
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Logic/workflows",
+      "apiVersion": "2019-05-01",
+      "name": "[parameters('PlaybookName')]",
+      "location": "[resourceGroup().location]",
+      "identity": {
+        "type": "SystemAssigned"
+      },
+      "properties": {
+        "state": "Enabled",
+        "definition": {
+          "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+          "contentVersion": "1.0.0.0",
+          "triggers": {
+            "Microsoft_Sentinel_incident": {
+              "type": "ApiConnectionWebhook",
+              "inputs": {
+                "host": {
+                  "connection": { "name": "@parameters('$connections')['azuresentinel']['connectionId']" }
+                },
+                "body": {
+                  "callback_url": "@{listCallbackUrl()}"
+                },
+                "path": "/incident-creation"
+              }
+            }
+          },
+          "actions": {
+            "Call_Base_Module": {
+              "type": "ApiConnection",
+              "inputs": {
+                "host": { "connection": { "name": "@parameters('$connections')['statsecure']['connectionId']" } },
+                "method": "post",
+                "path": "/BaseModule",
+                "body": {
+                  "IncidentARMId": "@triggerBody()?['object']?['id']",
+                  "Entities": "@triggerBody()?['object']?['properties']?['relatedEntities']"
+                }
+              },
+              "runAfter": {}
+            },
+            "Call_AAD_Risk_Module": {
+              "type": "ApiConnection",
+              "inputs": {
+                "host": { "connection": { "name": "@parameters('$connections')['statsecure']['connectionId']" } },
+                "method": "post",
+                "path": "/Modules/AADRisk",
+                "body": "@body('Call_Base_Module')"
+              },
+              "runAfter": { "Call_Base_Module": ["Succeeded"] }
+            },
+            "Call_Threat_Intel_Module": {
+              "type": "ApiConnection",
+              "inputs": {
+                "host": { "connection": { "name": "@parameters('$connections')['statsecure']['connectionId']" } },
+                "method": "post",
+                "path": "/Modules/ThreatIntel",
+                "body": "@body('Call_Base_Module')"
+              },
+              "runAfter": { "Call_Base_Module": ["Succeeded"] }
+            },
+            "Call_UEBA_Module": {
+              "type": "ApiConnection",
+              "inputs": {
+                "host": { "connection": { "name": "@parameters('$connections')['statsecure']['connectionId']" } },
+                "method": "post",
+                "path": "/Modules/UEBA",
+                "body": "@body('Call_Base_Module')"
+              },
+              "runAfter": { "Call_Base_Module": ["Succeeded"] }
+            },
+            "Call_Related_Alerts_Module": {
+              "type": "ApiConnection",
+              "inputs": {
+                "host": { "connection": { "name": "@parameters('$connections')['statsecure']['connectionId']" } },
+                "method": "post",
+                "path": "/Modules/RelatedAlerts",
+                "body": "@body('Call_Base_Module')"
+              },
+              "runAfter": { "Call_Base_Module": ["Succeeded"] }
+            },
+            "Call_Risk_Scoring_Module": {
+              "type": "ApiConnection",
+              "inputs": {
+                "host": { "connection": { "name": "@parameters('$connections')['statsecure']['connectionId']" } },
+                "method": "post",
+                "path": "/Modules/RiskScoring",
+                "body": {
+                  "Factors": {
+                    "AadRiskLevelHigh": "@equals(body('Call_AAD_Risk_Module')?['results']?[0]?['RiskLevel'], 'high')",
+                    "AadRiskLevelMedium": "@equals(body('Call_AAD_Risk_Module')?['results']?[0]?['RiskLevel'], 'medium')",
+                    "ThreatIntelMatch": "@greater(length(body('Call_Threat_Intel_Module')?['results']), 0)",
+                    "UebaHighPriority": "@greater(body('Call_UEBA_Module')?['results']?[0]?['MaxPriority'], 5)",
+                    "RelatedAlertsPresent": "@greater(length(body('Call_Related_Alerts_Module')?['results']), 0)"
+                  }
+                }
+              },
+              "runAfter": {
+                "Call_AAD_Risk_Module": ["Succeeded"],
+                "Call_Threat_Intel_Module": ["Succeeded"],
+                "Call_UEBA_Module": ["Succeeded"],
+                "Call_Related_Alerts_Module": ["Succeeded"]
+              }
+            },
+            "Condition_High_Risk": {
+              "type": "If",
+              "expression": {
+                "equals": ["@body('Call_Risk_Scoring_Module')?['band']", "High"]
+              },
+              "actions": {
+                "Update_Incident_Severity_High": {
+                  "type": "ApiConnection",
+                  "inputs": {
+                    "host": { "connection": { "name": "@parameters('$connections')['azuresentinel']['connectionId']" } },
+                    "method": "put",
+                    "path": "/Incidents/@{encodeURIComponent(triggerBody()?['object']?['name'])}",
+                    "body": { "properties": { "severity": "High", "status": "Active" } }
+                  },
+                  "runAfter": {}
+                },
+                "Trigger_Remediation_Playbook": {
+                  "type": "ApiConnection",
+                  "inputs": {
+                    "host": { "connection": { "name": "@parameters('$connections')['statsecure']['connectionId']" } },
+                    "method": "post",
+                    "path": "/Modules/RunPlaybook",
+                    "body": {
+                      "PlaybookName": "NotifySocTeams",
+                      "IncidentARMId": "@triggerBody()?['object']?['id']",
+                      "Entities": "@triggerBody()?['object']?['properties']?['relatedEntities']"
+                    }
+                  },
+                  "runAfter": { "Update_Incident_Severity_High": ["Succeeded"] }
+                }
+              },
+              "else": {
+                "actions": {
+                  "Add_Comment_Low_Risk": {
+                    "type": "ApiConnection",
+                    "inputs": {
+                      "host": { "connection": { "name": "@parameters('$connections')['azuresentinel']['connectionId']" } },
+                      "method": "post",
+                      "path": "/Incidents/@{encodeURIComponent(triggerBody()?['object']?['name'])}/comments",
+                      "body": {
+                        "message": "STAT-Secure triage completed. Risk band: @{body('Call_Risk_Scoring_Module')?['band']}, score: @{body('Call_Risk_Scoring_Module')?['score']}. No high-risk factors detected; no automated remediation triggered."
+                      }
+                    },
+                    "runAfter": {}
+                  }
+                }
+              },
+              "runAfter": { "Call_Risk_Scoring_Module": ["Succeeded"] }
+            }
+          },
+          "parameters": {
+            "$connections": { "defaultValue": {}, "type": "Object" }
+          }
+        },
+        "parameters": {
+          "$connections": {
+            "value": {
+              "azuresentinel": {
+                "connectionId": "[resourceId('Microsoft.Web/connections', 'azuresentinel')]",
+                "connectionName": "azuresentinel",
+                "id": "[concat('/subscriptions/', subscription().subscriptionId, '/providers/Microsoft.Web/locations/', resourceGroup().location, '/managedApis/azuresentinel')]"
+              },
+              "statsecure": {
+                "connectionId": "[resourceId('Microsoft.Web/connections', parameters('STATConnectionName'))]",
+                "connectionName": "[parameters('STATConnectionName')]",
+                "id": "[concat('/subscriptions/', subscription().subscriptionId, '/resourceGroups/', resourceGroup().name, '/providers/Microsoft.Web/customApis/', parameters('STATConnectionName'))]"
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "outputs": {
+    "logicAppResourceId": {
+      "type": "string",
+      "value": "[resourceId('Microsoft.Logic/workflows', parameters('PlaybookName'))]"
+    }
+  }
+}

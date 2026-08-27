@@ -1,0 +1,12 @@
+{
+  "name": "MCASModule",
+  "description": "Retrieves the Microsoft Defender for Cloud Apps investigation priority score for account entities.",
+  "requiredPermissions": {
+    "logAnalytics": [],
+    "keyVaultSecrets": ["mcas-api-token"],
+    "graph": []
+  },
+  "inputEntityTypes": ["account"],
+  "maxEntitiesPerCall": 20,
+  "notes": "MCAS token is a scoped API token (read-only investigation priority score endpoint), stored only in Key Vault, never in app settings."
+}

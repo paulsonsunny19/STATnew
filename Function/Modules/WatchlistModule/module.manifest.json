@@ -1,0 +1,12 @@
+{
+  "name": "WatchlistModule",
+  "description": "Compares entity data (UPN, IP, or CIDR block match) against a named Sentinel watchlist.",
+  "requiredPermissions": {
+    "logAnalytics": ["Log Analytics Reader on the Sentinel workspace"],
+    "keyVaultSecrets": [],
+    "graph": []
+  },
+  "inputEntityTypes": ["account", "ip"],
+  "maxEntitiesPerCall": 20,
+  "notes": "WatchlistAlias is validated against a strict alphanumeric pattern before use in a query - prevents referencing arbitrary or unintended watchlists via a crafted alias string."
+}

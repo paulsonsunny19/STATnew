@@ -1,0 +1,18 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "FUNCTIONS_WORKER_RUNTIME": "powershell",
+    "AzureWebJobsFeatureFlags": "EnableWorkerIndexing",
+
+    "// NOTE": "No secrets belong here. Real deployments resolve everything below via Managed Identity + Key Vault references, e.g. @Microsoft.KeyVault(SecretUri=https://<vault>.vault.azure.net/secrets/<name>/)",
+
+    "KEY_VAULT_NAME": "<your-keyvault-name>",
+    "SENTINEL_WORKSPACE_ID": "<log-analytics-workspace-guid>",
+    "SENTINEL_SUBSCRIPTION_ID": "<subscription-guid>",
+    "SENTINEL_RESOURCE_GROUP": "<resource-group-name>",
+    "SENTINEL_WORKSPACE_NAME": "<workspace-name>",
+
+    "ALLOWED_ORIGIN": "https://logic-apps-custom-connector-origin.azure-apim.net",
+    "MAX_ENTITY_COUNT": "50"
+  }
+}

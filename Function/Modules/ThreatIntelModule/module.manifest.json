@@ -1,0 +1,12 @@
+{
+  "name": "ThreatIntelModule",
+  "description": "Cross-references incident entities against Sentinel's ThreatIntelligenceIndicator table.",
+  "requiredPermissions": {
+    "logAnalytics": ["Log Analytics Reader on the Sentinel workspace"],
+    "keyVaultSecrets": [],
+    "graph": []
+  },
+  "inputEntityTypes": ["ip", "host", "url", "filehash"],
+  "maxEntitiesPerCall": 20,
+  "notes": "Only reads ThreatIntelligenceIndicator; never writes/tags indicators (no ThreatIndicators.ReadWrite scope requested)."
+}
