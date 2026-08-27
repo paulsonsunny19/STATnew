@@ -1,0 +1,45 @@
+name: Export STAT-Secure
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'STAT-Secure (1).zip'
+      - '.github/workflows/export-stat-secure.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Extract project into repository root
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf .stat-export
+          mkdir .stat-export
+          unzip -q 'STAT-Secure (1).zip' -d .stat-export
+          test -d .stat-export/STAT-Secure
+          cp -a .stat-export/STAT-Secure/. ./
+          rm -rf .stat-export
+          rm -f 'STAT-Secure (1).zip'
+
+      - name: Commit exported project
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          if git diff --cached --quiet; then
+            echo 'Nothing to export.'
+            exit 0
+          fi
+          git commit -m 'Export STAT-Secure project files'
+          git push
