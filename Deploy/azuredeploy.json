@@ -5,13 +5,14 @@
     "_generator": {
       "name": "bicep",
       "version": "0.46.1.21595",
-      "templateHash": "8928832941573146778"
+      "templateHash": "15694933869150196160"
     }
   },
   "parameters": {
     "baseName": {
       "type": "string",
       "defaultValue": "statsecure",
+      "maxLength": 10,
       "metadata": {
         "description": "Base name used to derive resource names"
       }
@@ -50,7 +51,7 @@
   },
   "variables": {
     "funcAppName": "[format('{0}-func', parameters('baseName'))]",
-    "storageAccountName": "[toLower(format('{0}sa{1}', parameters('baseName'), uniqueString(resourceGroup().id)))]",
+    "storageAccountName": "[toLower(format('{0}sa{1}', parameters('baseName'), take(uniqueString(resourceGroup().id), 12)))]",
     "appInsightsName": "[format('{0}-ai', parameters('baseName'))]",
     "keyVaultName": "[format('{0}-kv-{1}', parameters('baseName'), uniqueString(resourceGroup().id))]",
     "planName": "[format('{0}-plan', parameters('baseName'))]",
