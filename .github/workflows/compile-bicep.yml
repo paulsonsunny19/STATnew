@@ -1,0 +1,47 @@
+name: Compile Bicep ARM template
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Deploy/main.bicep'
+      - '.github/workflows/compile-bicep.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  compile:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Bicep CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -Lo bicep https://github.com/Azure/bicep/releases/latest/download/bicep-linux-x64
+          chmod +x ./bicep
+
+      - name: Compile Bicep to ARM JSON
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./bicep build Deploy/main.bicep --outfile Deploy/azuredeploy.json
+          python -m json.tool Deploy/azuredeploy.json >/dev/null
+
+      - name: Commit compiled ARM template
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Deploy/azuredeploy.json
+          if git diff --cached --quiet; then
+            echo 'Compiled template is already current.'
+            exit 0
+          fi
+          git commit -m 'Compile Bicep to ARM deployment template'
+          git push
