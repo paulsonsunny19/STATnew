@@ -1,0 +1,224 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "PlaybookName": {
+      "type": "string",
+      "defaultValue": "NotifySocTeams",
+      "metadata": {
+        "description": "Must match the 'NotifySocTeams' logical name in Function/Modules/RunPlaybookModule/PlaybookAllowList.psd1 - the trigger URL of the deployed workflow is what gets stored (via Key Vault) under that allow-list entry."
+      }
+    },
+    "SentinelSubscriptionId": {
+      "type": "string",
+      "metadata": { "description": "Subscription ID containing the Sentinel-enabled Log Analytics workspace." }
+    },
+    "SentinelResourceGroup": {
+      "type": "string",
+      "metadata": { "description": "Resource group containing the Sentinel-enabled Log Analytics workspace." }
+    },
+    "SentinelWorkspaceName": {
+      "type": "string",
+      "metadata": { "description": "Name of the Sentinel-enabled Log Analytics workspace to query for PIM and activity detail." }
+    },
+    "SocTeamEmail": {
+      "type": "string",
+      "metadata": { "description": "SOC distribution list / mailbox that receives the Global Administrator usage notification email." }
+    },
+    "SenderMailboxUpn": {
+      "type": "string",
+      "metadata": {
+        "description": "UPN of the mailbox the notification is sent from via Microsoft Graph sendMail. The playbook authenticates with its own system-assigned managed identity (Mail.Send application permission), never a stored credential - see README.md for how to scope which mailbox that permission can send as."
+      }
+    },
+    "ActivationWindowHours": {
+      "type": "int",
+      "defaultValue": 24,
+      "metadata": { "description": "How far back/forward around the Global Administrator activation to look for activity performed by the account. Align with your PIM policy's maximum activation duration." }
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Logic/workflows",
+      "apiVersion": "2019-05-01",
+      "name": "[parameters('PlaybookName')]",
+      "location": "[resourceGroup().location]",
+      "identity": {
+        "type": "SystemAssigned"
+      },
+      "properties": {
+        "state": "Enabled",
+        "definition": {
+          "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+          "contentVersion": "1.0.0.0",
+          "triggers": {
+            "manual": {
+              "type": "Request",
+              "kind": "Http",
+              "inputs": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "IncidentARMId": { "type": "string" },
+                    "Entities": { "type": "array" },
+                    "TriggeredBy": { "type": "string" },
+                    "TriggeredAt": { "type": "string" }
+                  },
+                  "required": ["IncidentARMId"]
+                }
+              }
+            }
+          },
+          "actions": {
+            "Get_Incident_Alerts": {
+              "type": "ApiConnection",
+              "inputs": {
+                "host": { "connection": { "name": "@parameters('$connections')['azuresentinel']['connectionId']" } },
+                "method": "post",
+                "path": "/Incidents/@{encodeURIComponent(last(split(triggerBody()?['IncidentARMId'], '/')))}/alerts"
+              },
+              "runAfter": {}
+            },
+            "Parse_GA_Alert_Details": {
+              "type": "Compose",
+              "inputs": {
+                "RequestId": "@coalesce(body('Get_Incident_Alerts')?['value']?[0]?['properties']?['extendedProperties']?['RequestId'], '')",
+                "GlobalAdminAccount": "@coalesce(body('Get_Incident_Alerts')?['value']?[0]?['properties']?['extendedProperties']?['GlobalAdminAccount'], first(filter(triggerBody()?['Entities'], item()?['Type'] == 'account'))?['Value'], '')",
+                "RequestingOrActivatingActor": "@coalesce(body('Get_Incident_Alerts')?['value']?[0]?['properties']?['extendedProperties']?['RequestingOrActivatingActor'], '')",
+                "ActivationType": "@coalesce(body('Get_Incident_Alerts')?['value']?[0]?['properties']?['extendedProperties']?['ActivationType'], 'Unknown')"
+              },
+              "runAfter": { "Get_Incident_Alerts": ["Succeeded"] }
+            },
+            "Get_PIM_Request_Details": {
+              "type": "ApiConnection",
+              "inputs": {
+                "host": { "connection": { "name": "@parameters('$connections')['azuremonitorlogs']['connectionId']" } },
+                "method": "post",
+                "path": "/queryData",
+                "queries": {
+                  "subscriptions": "[parameters('SentinelSubscriptionId')]",
+                  "resourcegroups": "[parameters('SentinelResourceGroup')]",
+                  "resourcetype": "Log Analytics Workspace",
+                  "resourcename": "[parameters('SentinelWorkspaceName')]"
+                },
+                "body": {
+                  "query": "let TargetRequestId = '@{outputs('Parse_GA_Alert_Details')?['RequestId']}';\nlet TargetUser = '@{outputs('Parse_GA_Alert_Details')?['GlobalAdminAccount']}';\nAuditLogs\n| where TimeGenerated > ago(2d)\n| where Category == \"RoleManagement\"\n| mv-expand TargetResources\n| where TargetResources.type == \"Role\"\n| mv-expand ModifiedProperty = TargetResources.modifiedProperties\n| where ModifiedProperty.displayName == \"Role.DisplayName\"\n| where tostring(ModifiedProperty.newValue) has \"Global Administrator\"\n| mv-expand AdditionalDetail = AdditionalDetails\n| extend DetailKey = tostring(AdditionalDetail.key), DetailValue = tostring(AdditionalDetail.value)\n| summarize AdditionalMap = make_bag(pack(DetailKey, DetailValue))\n    by TimeGenerated, OperationName, Result,\n       RowTargetUser = tostring(TargetResources.userPrincipalName),\n       Actor = tostring(InitiatedBy.user.userPrincipalName)\n| extend RequestId = tostring(AdditionalMap.RequestId)\n| extend Justification = tostring(coalesce(AdditionalMap.Justification, AdditionalMap.RoleAssignmentJustification))\n| extend TicketNumber = tostring(AdditionalMap.TicketNumber)\n| where (isnotempty(TargetRequestId) and RequestId == TargetRequestId) or RowTargetUser =~ TargetUser\n| summarize\n    RequestedBy   = anyif(Actor, OperationName has \"requested\" or OperationName has \"activate\"),\n    ApprovedBy    = anyif(Actor, OperationName has \"approved\"),\n    ActivatedAt   = minif(TimeGenerated, OperationName has \"completed\" or OperationName has \"activation\" or OperationName == \"Add member to role\"),\n    Justification = anyif(Justification, isnotempty(Justification)),\n    TicketNumber  = anyif(TicketNumber, isnotempty(TicketNumber))\n    by RequestId, RowTargetUser",
+                  "timerange": "Set in query"
+                }
+              },
+              "runAfter": { "Parse_GA_Alert_Details": ["Succeeded"] }
+            },
+            "Get_GA_Activities_Performed": {
+              "type": "ApiConnection",
+              "inputs": {
+                "host": { "connection": { "name": "@parameters('$connections')['azuremonitorlogs']['connectionId']" } },
+                "method": "post",
+                "path": "/queryData",
+                "queries": {
+                  "subscriptions": "[parameters('SentinelSubscriptionId')]",
+                  "resourcegroups": "[parameters('SentinelResourceGroup')]",
+                  "resourcetype": "Log Analytics Workspace",
+                  "resourcename": "[parameters('SentinelWorkspaceName')]"
+                },
+                "body": {
+                  "query": "let TargetUser = '@{outputs('Parse_GA_Alert_Details')?['GlobalAdminAccount']}';\nAuditLogs\n| where TimeGenerated > ago(@{parameters('ActivationWindowHours')}h)\n| where tostring(InitiatedBy.user.userPrincipalName) =~ TargetUser\n| project TimeGenerated, OperationName, Category, Result,\n    Target = tostring(TargetResources[0].displayName),\n    TargetType = tostring(TargetResources[0].type)\n| order by TimeGenerated asc\n| take 200",
+                  "timerange": "Set in query"
+                }
+              },
+              "runAfter": { "Get_PIM_Request_Details": ["Succeeded"] }
+            },
+            "Compose_Email_Body": {
+              "type": "Compose",
+              "inputs": "<html><body><h2>Global Administrator role usage</h2><table border=\"1\" cellpadding=\"6\" style=\"border-collapse:collapse\"><tr><th>Field</th><th>Value</th></tr><tr><td>Account elevated to Global Administrator</td><td>@{outputs('Parse_GA_Alert_Details')?['GlobalAdminAccount']}</td></tr><tr><td>Activation type</td><td>@{outputs('Parse_GA_Alert_Details')?['ActivationType']}</td></tr><tr><td>Requested by</td><td>@{coalesce(body('Get_PIM_Request_Details')?['value']?[0]?['tables']?[0]?['rows']?[0]?[0], outputs('Parse_GA_Alert_Details')?['RequestingOrActivatingActor'], 'Unknown')}</td></tr><tr><td>Approved by</td><td>@{coalesce(body('Get_PIM_Request_Details')?['value']?[0]?['tables']?[0]?['rows']?[0]?[1], 'Self-activation / no approval on record')}</td></tr><tr><td>Activated at (UTC)</td><td>@{coalesce(body('Get_PIM_Request_Details')?['value']?[0]?['tables']?[0]?['rows']?[0]?[2], 'Unknown')}</td></tr><tr><td>Justification</td><td>@{coalesce(body('Get_PIM_Request_Details')?['value']?[0]?['tables']?[0]?['rows']?[0]?[3], 'None recorded')}</td></tr><tr><td>Ticket number</td><td>@{coalesce(body('Get_PIM_Request_Details')?['value']?[0]?['tables']?[0]?['rows']?[0]?[4], 'None recorded')}</td></tr><tr><td>Sentinel incident</td><td>@{triggerBody()?['IncidentARMId']}</td></tr></table><h3>Activities performed by this account (@{parameters('ActivationWindowHours')}h window)</h3><p>Row count: @{length(body('Get_GA_Activities_Performed')?['value']?[0]?['tables']?[0]?['rows'])} - see the attached Sentinel incident / run this playbook's query directly in Log Analytics for the full, unabridged list.</p></body></html>",
+              "runAfter": { "Get_GA_Activities_Performed": ["Succeeded"] }
+            },
+            "Send_Email_via_Graph": {
+              "type": "Http",
+              "inputs": {
+                "method": "POST",
+                "uri": "[concat('https://graph.microsoft.com/v1.0/users/', parameters('SenderMailboxUpn'), '/sendMail')]",
+                "authentication": {
+                  "type": "ManagedServiceIdentity"
+                },
+                "body": {
+                  "message": {
+                    "subject": "@{concat('SOC ALERT: Global Administrator role used by ', outputs('Parse_GA_Alert_Details')?['GlobalAdminAccount'])}",
+                    "body": {
+                      "contentType": "HTML",
+                      "content": "@outputs('Compose_Email_Body')"
+                    },
+                    "toRecipients": [
+                      {
+                        "emailAddress": {
+                          "address": "[parameters('SocTeamEmail')]"
+                        }
+                      }
+                    ]
+                  },
+                  "saveToSentItems": false
+                }
+              },
+              "runAfter": { "Compose_Email_Body": ["Succeeded"] }
+            },
+            "Add_Comment_To_Incident": {
+              "type": "ApiConnection",
+              "inputs": {
+                "host": { "connection": { "name": "@parameters('$connections')['azuresentinel']['connectionId']" } },
+                "method": "post",
+                "path": "/Incidents/@{encodeURIComponent(last(split(triggerBody()?['IncidentARMId'], '/')))}/comments",
+                "body": {
+                  "message": "@{concat('NotifySocTeams: SOC notified by email at ', parameters('SocTeamEmail'), ' with Global Administrator PIM/assignment detail for ', outputs('Parse_GA_Alert_Details')?['GlobalAdminAccount'], '.')}"
+                }
+              },
+              "runAfter": { "Send_Email_via_Graph": ["Succeeded"] }
+            },
+            "Response": {
+              "type": "Response",
+              "inputs": {
+                "statusCode": 200,
+                "body": {
+                  "playbook": "[parameters('PlaybookName')]",
+                  "notified": "[parameters('SocTeamEmail')]"
+                }
+              },
+              "runAfter": { "Add_Comment_To_Incident": ["Succeeded"] }
+            }
+          },
+          "parameters": {
+            "$connections": { "defaultValue": {}, "type": "Object" },
+            "ActivationWindowHours": { "defaultValue": 24, "type": "Int" }
+          }
+        },
+        "parameters": {
+          "$connections": {
+            "value": {
+              "azuresentinel": {
+                "connectionId": "[resourceId('Microsoft.Web/connections', 'azuresentinel')]",
+                "connectionName": "azuresentinel",
+                "id": "[concat('/subscriptions/', subscription().subscriptionId, '/providers/Microsoft.Web/locations/', resourceGroup().location, '/managedApis/azuresentinel')]"
+              },
+              "azuremonitorlogs": {
+                "connectionId": "[resourceId('Microsoft.Web/connections', 'azuremonitorlogs')]",
+                "connectionName": "azuremonitorlogs",
+                "id": "[concat('/subscriptions/', subscription().subscriptionId, '/providers/Microsoft.Web/locations/', resourceGroup().location, '/managedApis/azuremonitorlogs')]"
+              }
+            }
+          },
+          "ActivationWindowHours": {
+            "value": "[parameters('ActivationWindowHours')]"
+          }
+        }
+      }
+    }
+  ],
+  "outputs": {
+    "logicAppResourceId": {
+      "type": "string",
+      "value": "[resourceId('Microsoft.Logic/workflows', parameters('PlaybookName'))]"
+    },
+    "logicAppPrincipalId": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Logic/workflows', parameters('PlaybookName')), '2019-05-01', 'full').identity.principalId]"
+    }
+  }
+}

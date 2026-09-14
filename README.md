@@ -26,6 +26,8 @@ any specific codebase.
 
 ```
 STAT-Secure/
+├── AnalyticsRules/
+│   └── GlobalAdminRoleUsage/       (NRT rule: detects Global Administrator PIM activation/assignment)
 ├── Function/
 │   ├── host.json
 │   ├── profile.ps1
@@ -56,10 +58,12 @@ STAT-Secure/
 │   └── openapi.json
 ├── LogicApp/
 │   ├── azuredeploy.json           (sample end-to-end triage playbook)
+│   ├── NotifySocTeams/            (SOC email: Global Admin usage, who requested/approved it)
 │   └── README.md
 ├── Deploy/
 │   ├── main.bicep
-│   └── GrantGraphPermissions.ps1  (run once, manually, by a privileged admin)
+│   ├── GrantGraphPermissions.ps1              (run once, manually, by a privileged admin)
+│   └── GrantNotifySocMailSendPermission.ps1   (run once, manually, by a privileged admin)
 └── Docs/
     └── SECURITY.md
 ```
@@ -84,6 +88,24 @@ and a sample Logic App wiring them together:
 | Watchlists | UPN/IP/CIDR watchlist matching | Watchlist alias strictly pattern-validated before use |
 | Risk Scoring | Aggregate module outputs into a score | Deploy-time weights, not caller-supplied; strict boolean-only inputs |
 | Run Playbook | Invoke another Sentinel playbook | **Rebuilt as an allow-list of pre-registered playbook names** - the original accepts an arbitrary target from the caller |
+
+## Global Administrator usage monitoring
+
+Beyond the module library, this repo ships a complete detect-and-notify path for one specific
+high-value scenario: someone activating or being assigned the **Global Administrator**
+directory role.
+
+- **`AnalyticsRules/GlobalAdminRoleUsage`** - a Sentinel **NRT** analytics rule that fires
+  within ~1 minute of a Global Administrator PIM activation or direct role assignment.
+- **`LogicApp/NotifySocTeams`** - the `NotifySocTeams` playbook referenced in
+  `PlaybookAllowList.psd1` (previously just a name reserved for a future implementation, now
+  built out): on that incident, it resolves **who requested** the elevation, **who approved**
+  it, and **every activity the account performed** while Global Administrator, then emails SOC
+  a summary - authenticated via its own managed identity's Graph `Mail.Send` permission, no
+  stored mail credential.
+
+See each folder's README for deployment steps and the validation checklist to run against your
+tenant's `AuditLogs` before enabling in production.
 
 ## Getting started
 

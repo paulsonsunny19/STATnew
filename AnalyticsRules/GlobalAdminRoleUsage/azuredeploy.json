@@ -1,0 +1,84 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "WorkspaceName": {
+      "type": "string",
+      "metadata": { "description": "Name of the existing Log Analytics workspace that Sentinel is enabled on." }
+    },
+    "RuleDisplayName": {
+      "type": "string",
+      "defaultValue": "Global Administrator role activated or assigned"
+    },
+    "RuleEnabled": {
+      "type": "bool",
+      "defaultValue": true
+    },
+    "RuleSeverity": {
+      "type": "string",
+      "defaultValue": "High",
+      "allowedValues": ["Informational", "Low", "Medium", "High"]
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.OperationalInsights/workspaces/providers/alertRules",
+      "apiVersion": "2023-02-01-preview",
+      "name": "[concat(parameters('WorkspaceName'), '/Microsoft.SecurityInsights/', guid('GlobalAdminRoleUsageNRT'))]",
+      "kind": "NRT",
+      "properties": {
+        "displayName": "[parameters('RuleDisplayName')]",
+        "description": "Fires the moment the Global Administrator directory role is activated via PIM or assigned directly, so SOC is notified in near-real-time rather than waiting for a scheduled rule. This is the *detection* half of GA usage monitoring - see LogicApp/NotifySocTeams for the automation that enriches this alert with the PIM requestor/approver and every activity the account performed while elevated, then emails SOC.",
+        "severity": "[parameters('RuleSeverity')]",
+        "enabled": "[parameters('RuleEnabled')]",
+        "tactics": ["PrivilegeEscalation", "PersistenceEscalation"],
+        "techniques": ["T1098", "T1078"],
+        "query": "// Detects completion of a Global Administrator role change - either a PIM (Privileged Identity\n// Management) self-activation or a direct/permanent role assignment - against the AuditLogs\n// table only (single-table query, required for an NRT rule). Deeper correlation (who approved\n// the PIM request, and what the account then did while elevated) is deliberately NOT attempted\n// here - that needs a join across the activation/approval audit events and a lookback window,\n// which belongs in the downstream playbook (LogicApp/NotifySocTeams), not in a 60-second NRT\n// query. This rule's job is only to fire fast and hand the playbook a RequestId to join on.\n//\n// NOTE: exact OperationName strings and AdditionalDetails key names for PIM audit events are\n// documented by Microsoft but can vary slightly by tenant / Entra ID role management module\n// version. Validate against a sample of AuditLogs in your own workspace before enabling in\n// production - see AnalyticsRules/GlobalAdminRoleUsage/README.md.\nAuditLogs\n| where TimeGenerated > ago(15m)\n| where Category == \"RoleManagement\"\n| where OperationName in (\n    \"Add member to role completed (PIM activation)\",\n    \"Add member to role\"\n)\n| mv-expand TargetResources\n| where TargetResources.type == \"Role\"\n| mv-expand ModifiedProperty = TargetResources.modifiedProperties\n| where ModifiedProperty.displayName == \"Role.DisplayName\"\n| where tostring(ModifiedProperty.newValue) has \"Global Administrator\"\n| mv-expand AdditionalDetail = AdditionalDetails\n| extend DetailKey = tostring(AdditionalDetail.key), DetailValue = tostring(AdditionalDetail.value)\n| summarize AdditionalMap = make_bag(pack(DetailKey, DetailValue))\n    by TimeGenerated, OperationName, Result, CorrelationId,\n       TargetUser = tostring(TargetResources.userPrincipalName),\n       TargetUserId = tostring(TargetResources.id),\n       InitiatingActor = tostring(InitiatedBy.user.userPrincipalName),\n       InitiatingActorId = tostring(InitiatedBy.user.id),\n       InitiatingIp = tostring(InitiatedBy.user.ipAddress)\n| extend ActivationType = iif(OperationName == \"Add member to role completed (PIM activation)\", \"PIM-Activation\", \"Direct-Assignment\")\n| extend RequestId = tostring(AdditionalMap.RequestId)\n| project TimeGenerated, OperationName, ActivationType, Result, CorrelationId, RequestId,\n    TargetUser, TargetUserId, InitiatingActor, InitiatingActorId, InitiatingIp",
+        "queryFrequency": "PT1M",
+        "queryPeriod": "PT1M",
+        "triggerOperator": "GreaterThan",
+        "triggerThreshold": 0,
+        "suppressionDuration": "PT5H",
+        "suppressionEnabled": false,
+        "alertDetailsOverride": {
+          "alertDisplayNameFormat": "Global Administrator role used by {{TargetUser}} ({{ActivationType}})"
+        },
+        "customDetails": {
+          "ActivationType": "ActivationType",
+          "RequestId": "RequestId",
+          "GlobalAdminAccount": "TargetUser",
+          "RequestingOrActivatingActor": "InitiatingActor"
+        },
+        "entityMappings": [
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              { "identifier": "FullName", "columnName": "TargetUser" }
+            ]
+          },
+          {
+            "entityType": "Account",
+            "fieldMappings": [
+              { "identifier": "FullName", "columnName": "InitiatingActor" }
+            ]
+          },
+          {
+            "entityType": "IP",
+            "fieldMappings": [
+              { "identifier": "Address", "columnName": "InitiatingIp" }
+            ]
+          }
+        ],
+        "incidentConfiguration": {
+          "createIncident": true,
+          "groupingConfiguration": {
+            "enabled": true,
+            "reopenClosedIncident": false,
+            "lookbackDuration": "PT5H",
+            "matchingMethod": "AllEntities"
+          }
+        }
+      }
+    }
+  ]
+}

@@ -40,3 +40,12 @@ AAD Risk  Threat Intel  UEBA          Related Alerts
   `NotifySocTeams` for a remediation playbook like `IsolateDevice` or `DisableAccount` only
   after you've validated the downstream playbook's own blast radius and added appropriate
   approval gates (e.g. an Adaptive Card approval step) for anything destructive.
+
+## `NotifySocTeams`
+
+`NotifySocTeams/azuredeploy.json` is the actual implementation of the `NotifySocTeams` playbook
+`PlaybookAllowList.psd1` references (Key Vault secret `playbook-trigger-notifysoc`). It's built
+specifically around Global Administrator role usage: it enriches an incident with who
+requested the elevation, who approved it, and what the account did while elevated, then emails
+SOC. Pair it with `AnalyticsRules/GlobalAdminRoleUsage` for the NRT detection that feeds it.
+See `NotifySocTeams/README.md` for deployment and the required Graph `Mail.Send` grant.
