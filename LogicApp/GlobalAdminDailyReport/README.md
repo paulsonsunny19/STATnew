@@ -93,6 +93,19 @@ If no Global Administrator activity happened, the email still sends with a singl
 the pipeline is alive rather than silence being ambiguous between "nothing happened" and
 "the report broke."
 
+## A note on the Azure Monitor Logs connector's response shape
+
+`Get_Yesterday_GA_Report`'s output is read as `body(...)?['value']` being **directly an array
+of row objects keyed by column name** (e.g. `item()?['GlobalAdminAccount']`) - not the raw Kusto
+REST shape (`tables[0].rows` as an array of positional arrays) an earlier version of this
+template assumed, which failed with `ExpressionEvaluationFailed ... must be a valid array`.
+This is based on the commonly-documented behavior of the Consumption "Azure Monitor Logs -
+Run query and list results" action, but connector response shapes have changed across API
+revisions before. If `For_each_Row` still fails after redeploying, open the failed run in the
+portal, expand `Get_Yesterday_GA_Report`'s raw output, and check what `value` actually looks
+like - paste it back and the query/foreach expression can be corrected to match exactly rather
+than guessed again.
+
 ## Validated against real tenant data
 
 The `OperationName` strings and `AdditionalDetails` keys in this query (notably joining on

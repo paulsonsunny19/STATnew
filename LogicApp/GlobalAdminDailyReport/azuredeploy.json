@@ -133,13 +133,13 @@
             },
             "For_each_Row": {
               "type": "Foreach",
-              "foreach": "@body('Get_Yesterday_GA_Report')?['value']?[0]?['tables']?[0]?['rows']",
+              "foreach": "@coalesce(body('Get_Yesterday_GA_Report')?['value'], createArray())",
               "actions": {
                 "Append_Row_To_Html": {
                   "type": "AppendToStringVariable",
                   "inputs": {
                     "name": "RowsHtml",
-                    "value": "@{concat('<tr><td>', string(item()?[0]), '</td><td>', string(item()?[1]), '</td><td>', string(item()?[2]), '</td><td>', string(item()?[3]), '</td><td>', string(item()?[4]), '</td><td>', string(item()?[5]), '</td><td>', string(item()?[6]), '</td><td>', string(item()?[7]), '</td><td>', string(item()?[8]), '</td><td>', string(item()?[9]), '</td><td>', string(item()?[10]), '</td><td>', string(item()?[11]), '</td><td>', string(item()?[12]), '</td></tr>')}"
+                    "value": "@{concat('<tr><td>', string(item()?['ActivatedAt']), '</td><td>', string(item()?['GlobalAdminAccount']), '</td><td>', string(item()?['ActivationType']), '</td><td>', string(item()?['RequestedBy']), '</td><td>', string(item()?['RequestedAt']), '</td><td>', string(item()?['ApprovedBy']), '</td><td>', string(item()?['DeniedBy']), '</td><td>', string(item()?['TimedOut']), '</td><td>', string(item()?['RequesterJustification']), '</td><td>', string(item()?['TicketNumber']), '</td><td>', string(item()?['ApproverComment']), '</td><td>', string(item()?['RevokedAt']), '</td><td>', string(item()?['RoleAssignmentRequestId']), '</td></tr>')}"
                   }
                 }
               },

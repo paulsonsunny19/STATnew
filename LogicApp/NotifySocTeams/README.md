@@ -126,6 +126,17 @@ reverted to that approach instead.
 | `SenderMailboxUpn` | Mailbox the notification is sent "from" via the Office 365 Outlook connector |
 | `ActivationWindowHours` | Lookback/lookahead window for "activities performed" (default 24h - align with your PIM policy's max activation duration) |
 
+## A note on the Azure Monitor Logs connector's response shape
+
+Both Log Analytics query results (`Get_PIM_Request_Details`, `Get_GA_Activities_Performed`) are
+read as `body(...)?['value']` being **directly an array of row objects keyed by column name**
+(e.g. `body('Get_PIM_Request_Details')?['value']?[0]?['RequestedBy']`) - not the raw Kusto REST
+shape (`tables[0].rows` as positional arrays) an earlier version of this template assumed, which
+failed at run time. If either query action's downstream expression still errors after
+redeploying, open the failed run in the portal, expand that action's raw output, and check what
+`value` actually contains - see `LogicApp/GlobalAdminDailyReport/README.md` for the same note in
+more detail (that playbook hit this first).
+
 ## Validate before production use
 
 Same caveat as the NRT rule: PIM `OperationName` strings and `AdditionalDetails` key names
