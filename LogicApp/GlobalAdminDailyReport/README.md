@@ -31,23 +31,27 @@ deploying, open each in the Azure portal (same resource group) and authorize it:
 separate connection resource from the one `NotifySocTeams` creates, even though it's the same
 connector - each playbook deploys and authorizes its own); `office365` is covered below.
 
-## Sending mail: Office 365 Outlook connector + managed identity (no stored mailbox sign-in)
+## Sending mail: Office 365 Outlook connector, authorized as a shared mailbox
 
 Same approach as `NotifySocTeams`: `Send_Email_via_Office365` calls the Office 365 Outlook
-connector's `SendEmailV2` operation with `"authentication": {"type": "ManagedServiceIdentity"}`,
-so the call is authorized using this Logic App's own system-assigned managed identity rather
-than a signed-in user's stored OAuth credential.
+connector's `SendEmailV2` operation. **This connector does not support "Connect with managed
+identity"** - unlike `azuremonitorlogs`, Exchange Online mailbox access isn't governed by
+Azure RBAC, so there's no managed-identity option for it in the portal.
 
-After deploying, open the `office365` connection this template creates and authorize it via
-**"Connect with managed identity"** in the Azure portal, selecting this workflow's identity.
-That still requires Exchange Online to authorize the identity to send as `SenderMailboxUpn` -
-it just moves how you grant that from a Graph SDK script
-(`Deploy/GrantNotifySocMailSendPermission.ps1`, still available as a fallback if your
-tenant/connector version doesn't offer the managed-identity connection option) to the portal's
-own consent flow. Either way, scope it down with an
-[Exchange Online application access policy](https://learn.microsoft.com/graph/auth-limit-mailbox-access)
-restricting the identity to only `SenderMailboxUpn`, and send a test report before relying on
-this daily - verify the email actually arrives "from" the expected address.
+After deploying, use a **dedicated shared/service mailbox** (e.g.
+`sentinel-automation@yourdomain.com`, set as `SenderMailboxUpn`) rather than a person's
+mailbox, and authorize the `office365` connection this template creates by signing in **as that
+mailbox** in the Azure portal. This is a standing delegated OAuth grant, not a stored password -
+Logic Apps manages the token refresh - but it is tied to that account, so a disabled account,
+revoked MFA, or forced re-consent will break the connection and need re-authorizing. Send a
+test report before relying on this daily - verify the email actually arrives "from" the
+expected address.
+
+If you'd rather have a genuinely credential-free, managed-identity-only send path, the
+alternative is a raw HTTP action calling Microsoft Graph's `sendMail` endpoint directly
+(`authentication: ManagedServiceIdentity`) with the `Mail.Send` application permission granted
+via `Deploy/GrantNotifySocMailSendPermission.ps1`. Ask if you want this playbook reverted to
+that approach instead.
 
 ## Schedule
 

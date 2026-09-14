@@ -28,7 +28,7 @@
     "SenderMailboxUpn": {
       "type": "string",
       "metadata": {
-        "description": "UPN of the mailbox the notification is sent from via the Office 365 Outlook 'Send an email (V2)' connector action. The playbook authenticates that connector call with its own system-assigned managed identity (authentication: ManagedServiceIdentity) rather than a signed-in user's stored OAuth credential - see README.md for how the office365 connection needs to be authorized."
+        "description": "UPN of the mailbox the notification is sent from via the Office 365 Outlook 'Send an email (V2)' connector action. This connector does not support managed identity authorization - the office365 connection must be authorized by signing in as this mailbox (ideally a dedicated shared/service mailbox, not a person's), or as an account with 'Send As' rights on it. See README.md."
       }
     },
     "ActivationWindowHours": {
@@ -68,7 +68,7 @@
       "name": "office365",
       "location": "[resourceGroup().location]",
       "properties": {
-        "displayName": "office365-managed-identity",
+        "displayName": "office365",
         "api": {
           "id": "[concat('/subscriptions/', subscription().subscriptionId, '/providers/Microsoft.Web/locations/', resourceGroup().location, '/managedApis/office365')]"
         }
@@ -179,9 +179,6 @@
                 "host": { "connection": { "name": "@parameters('$connections')['office365']['connectionId']" } },
                 "method": "post",
                 "path": "/v2/Mail",
-                "authentication": {
-                  "type": "ManagedServiceIdentity"
-                },
                 "body": {
                   "To": "[parameters('SocTeamEmail')]",
                   "From": "[parameters('SenderMailboxUpn')]",
