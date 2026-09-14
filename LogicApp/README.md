@@ -48,7 +48,8 @@ AAD Risk  Threat Intel  UEBA          Related Alerts
 specifically around Global Administrator role usage: it enriches an incident with who
 requested the elevation, who approved it, and what the account did while elevated, then emails
 SOC. Pair it with `AnalyticsRules/GlobalAdminRoleUsage` for the NRT detection that feeds it.
-See `NotifySocTeams/README.md` for deployment and the required Graph `Mail.Send` grant.
+See `NotifySocTeams/README.md` for deployment and how the Office 365 Outlook connector is
+authorized via managed identity.
 
 ## `GlobalAdminDailyReport`
 

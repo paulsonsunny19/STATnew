@@ -39,10 +39,10 @@ Parse_GA_Alert_Details ─ pull RequestId / GlobalAdminAccount / RequestingOrAct
 Compose_Email_Body ── HTML summary table
         │
         ▼
-Send_Email_via_Graph ── POST /users/{SenderMailboxUpn}/sendMail, authenticated with this
-                         Logic App's own system-assigned managed identity (Mail.Send) - no
-                         stored connector credential, consistent with this repo's zero-secrets
-                         posture
+Send_Email_via_Office365 ── Office 365 Outlook "Send an email (V2)" connector action,
+                         authenticated with this Logic App's own system-assigned managed
+                         identity (authentication: ManagedServiceIdentity) rather than a
+                         signed-in user's stored OAuth credential
         │
         ▼
 Add_Comment_To_Incident ── logs on the Sentinel incident that SOC was notified and how
@@ -73,32 +73,48 @@ az deployment group create \
 ```
 
 After deploying, create (or update, if it already exists) the API connections named
-`azuresentinel` and `azuremonitorlogs` in the same resource group and authorize them - the
-Sentinel connection needs the workflow's own managed identity or a scoped app registration
-with `Microsoft Sentinel Contributor` (to post incident comments) and `Microsoft Sentinel
-Reader` at minimum; the Azure Monitor Logs connection needs `Log Analytics Reader` on the
-workspace.
+`azuresentinel`, `azuremonitorlogs`, and `office365` in the same resource group and authorize
+them - the Sentinel connection needs the workflow's own managed identity or a scoped app
+registration with `Microsoft Sentinel Contributor` (to post incident comments) and `Microsoft
+Sentinel Reader` at minimum; the Azure Monitor Logs connection needs `Log Analytics Reader` on
+the workspace; the `office365` connection is covered below.
 
-## Required permission: Microsoft Graph `Mail.Send`
+## Sending mail: Office 365 Outlook connector + managed identity (no stored mailbox sign-in)
 
-`Send_Email_via_Graph` authenticates with this Logic App's **system-assigned managed
-identity** - never a stored Office 365 connector OAuth credential or an SMTP password. Grant
-it the Graph **application** permission `Mail.Send` once, by a Global/Privileged Role
-Administrator, using `Deploy/GrantNotifySocMailSendPermission.ps1` (mirrors the pattern already
-used for the Function App's identity in `Deploy/GrantGraphPermissions.ps1` - a sensitive,
-tenant-wide grant deliberately kept out of the Bicep/ARM deploy path so a human reviews it).
+`Send_Email_via_Office365` calls the Office 365 Outlook connector's `SendEmailV2` operation
+with `"authentication": {"type": "ManagedServiceIdentity"}` set on the action - so the call is
+authorized using this Logic App's own system-assigned managed identity, not a stored, signed-in
+mailbox credential. This keeps the OAuth-sign-in step (and its "which human's session does this
+depend on" risk) out of the picture entirely.
 
-`Mail.Send` at the application level can send mail as **any** mailbox in the tenant unless you
-scope it down. Do that with an
-[Exchange Online application access policy](https://learn.microsoft.com/graph/auth-limit-mailbox-access)
-restricting this managed identity to only `SenderMailboxUpn` - don't leave it tenant-wide.
+**What you still need to do once, after deploying:**
+
+1. The `azuredeploy.json` template creates the `office365` connection resource shell, but
+   authorizing it is a manual step (same as `azuresentinel`/`azuremonitorlogs` above - ARM can't
+   script an OAuth/identity consent flow). In the Azure portal, open the `office365` connection
+   in this resource group and choose **"Connect with managed identity"** (rather than signing in
+   as a user) when prompted, selecting this Logic App's system-assigned identity.
+2. Being clear about what this actually requires: authorizing via managed identity does **not**
+   remove the need for Exchange Online to authorize the identity to send mail as
+   `SenderMailboxUpn` - it just moves how you grant that from a Graph SDK script
+   (`Deploy/GrantNotifySocMailSendPermission.ps1`, still available if your tenant/connector
+   version doesn't expose the "Connect with managed identity" option) to the portal's own
+   connection-authorization flow. Whichever path your tenant offers, still scope it down with an
+   [Exchange Online application access policy](https://learn.microsoft.com/graph/auth-limit-mailbox-access)
+   restricting the identity to only `SenderMailboxUpn` - don't leave it tenant-wide.
+3. **Test-send before relying on this in production.** The exact behavior of the connector's
+   `From` field when authorizing via managed identity (whether it actually sends *as*
+   `SenderMailboxUpn`, or as whatever mailbox the identity's grant happens to be scoped to) is
+   something to verify against your tenant, not something this template can guarantee - if the
+   test email doesn't arrive "from" the expected address, check the identity's Exchange
+   application access policy scope first.
 
 ## Parameters
 
 | Parameter | Purpose |
 |---|---|
 | `SocTeamEmail` | Distribution list / mailbox that receives the notification |
-| `SenderMailboxUpn` | Mailbox the notification is sent "from" via Graph `sendMail` |
+| `SenderMailboxUpn` | Mailbox the notification is sent "from" via the Office 365 Outlook connector |
 | `ActivationWindowHours` | Lookback/lookahead window for "activities performed" (default 24h - align with your PIM policy's max activation duration) |
 
 ## Validate before production use

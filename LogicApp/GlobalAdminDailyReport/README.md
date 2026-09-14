@@ -24,17 +24,28 @@ az deployment group create \
     SenderMailboxUpn=sentinel-automation@yourdomain.com
 ```
 
-After deploying, create/authorize the `azuremonitorlogs` API connection in the same resource
-group (needs `Log Analytics Reader` on the workspace) - same connection the `NotifySocTeams`
-playbook uses; you can point both at the same connection resource.
+After deploying, create/authorize the `azuremonitorlogs` and `office365` API connections in the
+same resource group - `azuremonitorlogs` needs `Log Analytics Reader` on the workspace (same
+connection the `NotifySocTeams` playbook uses; you can point both at the same connection
+resource); `office365` is covered below.
 
-## Required permission: Microsoft Graph `Mail.Send`
+## Sending mail: Office 365 Outlook connector + managed identity (no stored mailbox sign-in)
 
-Same as `NotifySocTeams` - this workflow authenticates `Send_Email_via_Graph` with its own
-system-assigned managed identity, no stored credential. Run
-`Deploy/GrantNotifySocMailSendPermission.ps1` against **this playbook's** `logicAppPrincipalId`
-output (it's a generic Mail.Send grant script, not specific to one playbook name) and scope the
-Exchange application access policy to cover `SenderMailboxUpn` for this identity too.
+Same approach as `NotifySocTeams`: `Send_Email_via_Office365` calls the Office 365 Outlook
+connector's `SendEmailV2` operation with `"authentication": {"type": "ManagedServiceIdentity"}`,
+so the call is authorized using this Logic App's own system-assigned managed identity rather
+than a signed-in user's stored OAuth credential.
+
+After deploying, open the `office365` connection this template creates and authorize it via
+**"Connect with managed identity"** in the Azure portal, selecting this workflow's identity.
+That still requires Exchange Online to authorize the identity to send as `SenderMailboxUpn` -
+it just moves how you grant that from a Graph SDK script
+(`Deploy/GrantNotifySocMailSendPermission.ps1`, still available as a fallback if your
+tenant/connector version doesn't offer the managed-identity connection option) to the portal's
+own consent flow. Either way, scope it down with an
+[Exchange Online application access policy](https://learn.microsoft.com/graph/auth-limit-mailbox-access)
+restricting the identity to only `SenderMailboxUpn`, and send a test report before relying on
+this daily - verify the email actually arrives "from" the expected address.
 
 ## Schedule
 
