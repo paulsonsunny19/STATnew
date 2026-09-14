@@ -41,6 +41,30 @@
     {
       "type": "Microsoft.Web/connections",
       "apiVersion": "2016-06-01",
+      "name": "azuresentinel",
+      "location": "[resourceGroup().location]",
+      "properties": {
+        "displayName": "azuresentinel",
+        "api": {
+          "id": "[concat('/subscriptions/', subscription().subscriptionId, '/providers/Microsoft.Web/locations/', resourceGroup().location, '/managedApis/azuresentinel')]"
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Web/connections",
+      "apiVersion": "2016-06-01",
+      "name": "azuremonitorlogs",
+      "location": "[resourceGroup().location]",
+      "properties": {
+        "displayName": "azuremonitorlogs",
+        "api": {
+          "id": "[concat('/subscriptions/', subscription().subscriptionId, '/providers/Microsoft.Web/locations/', resourceGroup().location, '/managedApis/azuremonitorlogs')]"
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Web/connections",
+      "apiVersion": "2016-06-01",
       "name": "office365",
       "location": "[resourceGroup().location]",
       "properties": {
@@ -56,6 +80,8 @@
       "name": "[parameters('PlaybookName')]",
       "location": "[resourceGroup().location]",
       "dependsOn": [
+        "[resourceId('Microsoft.Web/connections', 'azuresentinel')]",
+        "[resourceId('Microsoft.Web/connections', 'azuremonitorlogs')]",
         "[resourceId('Microsoft.Web/connections', 'office365')]"
       ],
       "identity": {

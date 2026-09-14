@@ -72,12 +72,21 @@ az deployment group create \
     SenderMailboxUpn=sentinel-automation@yourdomain.com
 ```
 
-After deploying, create (or update, if it already exists) the API connections named
-`azuresentinel`, `azuremonitorlogs`, and `office365` in the same resource group and authorize
-them - the Sentinel connection needs the workflow's own managed identity or a scoped app
-registration with `Microsoft Sentinel Contributor` (to post incident comments) and `Microsoft
-Sentinel Reader` at minimum; the Azure Monitor Logs connection needs `Log Analytics Reader` on
-the workspace; the `office365` connection is covered below.
+`azuredeploy.json` creates the `azuresentinel`, `azuremonitorlogs`, and `office365`
+`Microsoft.Web/connections` resource shells for you - deploying no longer fails with
+`ApiConnectionNotFound`. What ARM can't do is the OAuth/identity consent step, so **after
+deploying, open each of the three connections in the Azure portal (same resource group) and
+authorize them**:
+- `azuresentinel` - sign in with an account (or app registration) holding `Microsoft Sentinel
+  Contributor` (to post incident comments) and `Microsoft Sentinel Reader` at minimum.
+- `azuremonitorlogs` - sign in with an account holding `Log Analytics Reader` on the workspace.
+- `office365` - covered below.
+
+An unauthorized connection deploys fine but fails at run time with errors like
+`ApiConnectionNotFound` (if the connection resource is genuinely missing - now fixed) or
+`ConnectionAuthorizationFailed`/`InvalidAuthenticationToken` (if it exists but was never
+authorized) - if you hit either after deploying this template, check the connection's status in
+the portal before assuming the template itself is broken.
 
 ## Sending mail: Office 365 Outlook connector + managed identity (no stored mailbox sign-in)
 

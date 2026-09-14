@@ -24,10 +24,12 @@ az deployment group create \
     SenderMailboxUpn=sentinel-automation@yourdomain.com
 ```
 
-After deploying, create/authorize the `azuremonitorlogs` and `office365` API connections in the
-same resource group - `azuremonitorlogs` needs `Log Analytics Reader` on the workspace (same
-connection the `NotifySocTeams` playbook uses; you can point both at the same connection
-resource); `office365` is covered below.
+`azuredeploy.json` creates the `azuremonitorlogs` and `office365` `Microsoft.Web/connections`
+resource shells for you - deploying no longer fails with `ApiConnectionNotFound`. After
+deploying, open each in the Azure portal (same resource group) and authorize it:
+`azuremonitorlogs` needs a sign-in with `Log Analytics Reader` on the workspace (this is a
+separate connection resource from the one `NotifySocTeams` creates, even though it's the same
+connector - each playbook deploys and authorizes its own); `office365` is covered below.
 
 ## Sending mail: Office 365 Outlook connector + managed identity (no stored mailbox sign-in)
 
