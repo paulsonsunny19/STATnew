@@ -1,0 +1,182 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "PlaybookName": {
+      "type": "string",
+      "defaultValue": "GlobalAdminDailyReport"
+    },
+    "SentinelSubscriptionId": {
+      "type": "string",
+      "metadata": { "description": "Subscription ID containing the Sentinel-enabled Log Analytics workspace." }
+    },
+    "SentinelResourceGroup": {
+      "type": "string",
+      "metadata": { "description": "Resource group containing the Sentinel-enabled Log Analytics workspace." }
+    },
+    "SentinelWorkspaceName": {
+      "type": "string",
+      "metadata": { "description": "Name of the Sentinel-enabled Log Analytics workspace to query." }
+    },
+    "SocTeamEmail": {
+      "type": "string",
+      "metadata": { "description": "SOC distribution list / mailbox that receives the daily report." }
+    },
+    "SenderMailboxUpn": {
+      "type": "string",
+      "metadata": {
+        "description": "UPN of the mailbox the report is sent from via Microsoft Graph sendMail. Authenticated with this Logic App's own managed identity (Mail.Send) - see README.md."
+      }
+    },
+    "ReportHour": {
+      "type": "int",
+      "defaultValue": 9,
+      "metadata": { "description": "Local hour (0-23, in ReportTimeZone) the daily report is sent." }
+    },
+    "ReportMinute": {
+      "type": "int",
+      "defaultValue": 30,
+      "metadata": { "description": "Local minute the daily report is sent." }
+    },
+    "ReportTimeZone": {
+      "type": "string",
+      "defaultValue": "GMT Standard Time",
+      "metadata": {
+        "description": "Windows time zone ID for the Recurrence trigger (e.g. 'GMT Standard Time' = Dublin/London, DST-aware). This must be kept in sync with the IANA name hardcoded in the KQL query's ReportTimeZone let-statement inside this file - see README.md if you change it."
+      }
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Logic/workflows",
+      "apiVersion": "2019-05-01",
+      "name": "[parameters('PlaybookName')]",
+      "location": "[resourceGroup().location]",
+      "identity": {
+        "type": "SystemAssigned"
+      },
+      "properties": {
+        "state": "Enabled",
+        "definition": {
+          "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+          "contentVersion": "1.0.0.0",
+          "triggers": {
+            "Daily_Report_Schedule": {
+              "type": "Recurrence",
+              "recurrence": {
+                "frequency": "Day",
+                "interval": 1,
+                "schedule": {
+                  "hours": ["[parameters('ReportHour')]"],
+                  "minutes": ["[parameters('ReportMinute')]"]
+                },
+                "timeZone": "[parameters('ReportTimeZone')]"
+              }
+            }
+          },
+          "actions": {
+            "Initialize_RowsHtml": {
+              "type": "InitializeVariable",
+              "inputs": {
+                "variables": [
+                  { "name": "RowsHtml", "type": "string", "value": "" }
+                ]
+              },
+              "runAfter": {}
+            },
+            "Get_Yesterday_GA_Report": {
+              "type": "ApiConnection",
+              "inputs": {
+                "host": { "connection": { "name": "@parameters('$connections')['azuremonitorlogs']['connectionId']" } },
+                "method": "post",
+                "path": "/queryData",
+                "queries": {
+                  "subscriptions": "[parameters('SentinelSubscriptionId')]",
+                  "resourcegroups": "[parameters('SentinelResourceGroup')]",
+                  "resourcetype": "Log Analytics Workspace",
+                  "resourcename": "[parameters('SentinelWorkspaceName')]"
+                },
+                "body": {
+                  "query": "let ReportTimeZone = \"Europe/Dublin\"; // IANA name - keep in sync with the ReportTimeZone ARM parameter (Windows ID) used by this workflow's Recurrence trigger\nlet NowLocal = datetime_utc_to_local(now(), ReportTimeZone);\nlet ReportStart = startofday(NowLocal) - 1d;   // yesterday, 00:00 local\nlet ReportEnd = startofday(NowLocal);          // today, 00:00 local (exclusive)\nlet CorrelationLookback = ago(4d);             // wide enough to resolve context for chains spanning the day boundary\nAuditLogs\n| where TimeGenerated > CorrelationLookback\n| where Category == \"RoleManagement\"\n| where OperationName in (\n    \"Add member to role requested (PIM activation)\",\n    \"Add member to role approval requested (PIM activation)\",\n    \"Add member to role request approved (PIM activation)\",\n    \"Add member to role request denied (PIM activation)\",\n    \"PIM activation request expired\",\n    \"Add member to role completed (PIM activation)\",\n    \"Add member to role\",\n    \"Remove member from role (PIM activation expired)\"\n)\n| mv-expand TargetResources\n| where TargetResources.type == \"Role\"\n| where tostring(TargetResources.displayName) has \"Global Administrator\"\n| mv-expand AdditionalDetail = AdditionalDetails\n| extend DetailKey = tostring(AdditionalDetail.key), DetailValue = tostring(AdditionalDetail.value)\n| extend Actor = tostring(coalesce(InitiatedBy.user.userPrincipalName, InitiatedBy.app.displayName))\n| extend LocalTime = datetime_utc_to_local(TimeGenerated, ReportTimeZone)\n| summarize AdditionalMap = make_bag(pack(DetailKey, DetailValue))\n    by TimeGenerated, LocalTime, OperationName, Result, Actor\n| extend RoleAssignmentRequestId = tostring(AdditionalMap.RoleAssignmentRequestId)\n| extend Justification = tostring(AdditionalMap.Justification)\n| extend TicketNumber = tostring(coalesce(AdditionalMap.TicketNumber, AdditionalMap.TicketSystem))\n| summarize\n    HadEventYesterday = anyif(true, LocalTime between (ReportStart .. ReportEnd)),\n    GlobalAdminAccount = anyif(Actor, OperationName == \"Add member to role requested (PIM activation)\"),\n    RequestedBy = anyif(Actor, OperationName == \"Add member to role requested (PIM activation)\"),\n    RequestedAt = minif(LocalTime, OperationName == \"Add member to role requested (PIM activation)\"),\n    RequesterJustification = anyif(Justification, OperationName == \"Add member to role requested (PIM activation)\"),\n    TicketNumber = anyif(TicketNumber, isnotempty(TicketNumber)),\n    ApprovedBy = anyif(Actor, OperationName == \"Add member to role request approved (PIM activation)\"),\n    ApproverComment = anyif(Justification, OperationName == \"Add member to role request approved (PIM activation)\"),\n    DeniedBy = anyif(Actor, OperationName == \"Add member to role request denied (PIM activation)\"),\n    TimedOut = anyif(true, OperationName == \"PIM activation request expired\"),\n    ActivatedAt = minif(LocalTime, OperationName in (\"Add member to role completed (PIM activation)\", \"Add member to role\")),\n    ActivationType = anyif(iif(OperationName == \"Add member to role\", \"Direct-Assignment\", \"PIM-Activation\"),\n                            OperationName in (\"Add member to role completed (PIM activation)\", \"Add member to role\")),\n    RevokedAt = minif(LocalTime, OperationName == \"Remove member from role (PIM activation expired)\")\n    by RoleAssignmentRequestId\n| where HadEventYesterday == true\n| project ActivatedAt, GlobalAdminAccount, ActivationType, RequestedBy, RequestedAt,\n    ApprovedBy, DeniedBy, TimedOut, RequesterJustification, TicketNumber, ApproverComment,\n    RevokedAt, RoleAssignmentRequestId\n| order by coalesce(ActivatedAt, RequestedAt) asc",
+                  "timerange": "Set in query"
+                }
+              },
+              "runAfter": { "Initialize_RowsHtml": ["Succeeded"] }
+            },
+            "For_each_Row": {
+              "type": "Foreach",
+              "foreach": "@body('Get_Yesterday_GA_Report')?['value']?[0]?['tables']?[0]?['rows']",
+              "actions": {
+                "Append_Row_To_Html": {
+                  "type": "AppendToStringVariable",
+                  "inputs": {
+                    "name": "RowsHtml",
+                    "value": "@{concat('<tr><td>', string(item()?[0]), '</td><td>', string(item()?[1]), '</td><td>', string(item()?[2]), '</td><td>', string(item()?[3]), '</td><td>', string(item()?[4]), '</td><td>', string(item()?[5]), '</td><td>', string(item()?[6]), '</td><td>', string(item()?[7]), '</td><td>', string(item()?[8]), '</td><td>', string(item()?[9]), '</td><td>', string(item()?[10]), '</td><td>', string(item()?[11]), '</td><td>', string(item()?[12]), '</td></tr>')}"
+                  }
+                }
+              },
+              "runAfter": { "Get_Yesterday_GA_Report": ["Succeeded"] }
+            },
+            "Compose_Email_Body": {
+              "type": "Compose",
+              "inputs": "<html><body><h2>Daily SOC report: Global Administrator activity</h2><p>Reporting period: @{formatDateTime(addDays(utcNow(),-1),'yyyy-MM-dd')} (previous calendar day, Europe/Dublin)</p><table border=\"1\" cellpadding=\"6\" style=\"border-collapse:collapse;font-size:12px\"><tr><th>Activated At</th><th>Account</th><th>Type</th><th>Requested By</th><th>Requested At</th><th>Approved By</th><th>Denied By</th><th>Timed Out</th><th>Requester Justification/Ticket</th><th>Ticket Number</th><th>Approver Comment</th><th>Revoked At</th><th>Correlation ID</th></tr>@{if(equals(variables('RowsHtml'), ''), '<tr><td colspan=\"13\">No Global Administrator activity recorded yesterday.</td></tr>', variables('RowsHtml'))}</table></body></html>",
+              "runAfter": { "For_each_Row": ["Succeeded"] }
+            },
+            "Send_Email_via_Graph": {
+              "type": "Http",
+              "inputs": {
+                "method": "POST",
+                "uri": "[concat('https://graph.microsoft.com/v1.0/users/', parameters('SenderMailboxUpn'), '/sendMail')]",
+                "authentication": {
+                  "type": "ManagedServiceIdentity"
+                },
+                "body": {
+                  "message": {
+                    "subject": "@{concat('Daily SOC report: Global Administrator activity - ', formatDateTime(addDays(utcNow(),-1),'yyyy-MM-dd'))}",
+                    "body": {
+                      "contentType": "HTML",
+                      "content": "@outputs('Compose_Email_Body')"
+                    },
+                    "toRecipients": [
+                      {
+                        "emailAddress": {
+                          "address": "[parameters('SocTeamEmail')]"
+                        }
+                      }
+                    ]
+                  },
+                  "saveToSentItems": false
+                }
+              },
+              "runAfter": { "Compose_Email_Body": ["Succeeded"] }
+            }
+          },
+          "parameters": {
+            "$connections": { "defaultValue": {}, "type": "Object" }
+          }
+        },
+        "parameters": {
+          "$connections": {
+            "value": {
+              "azuremonitorlogs": {
+                "connectionId": "[resourceId('Microsoft.Web/connections', 'azuremonitorlogs')]",
+                "connectionName": "azuremonitorlogs",
+                "id": "[concat('/subscriptions/', subscription().subscriptionId, '/providers/Microsoft.Web/locations/', resourceGroup().location, '/managedApis/azuremonitorlogs')]"
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "outputs": {
+    "logicAppResourceId": {
+      "type": "string",
+      "value": "[resourceId('Microsoft.Logic/workflows', parameters('PlaybookName'))]"
+    },
+    "logicAppPrincipalId": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Logic/workflows', parameters('PlaybookName')), '2019-05-01', 'full').identity.principalId]"
+    }
+  }
+}

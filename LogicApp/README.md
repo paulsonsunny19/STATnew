@@ -49,3 +49,11 @@ specifically around Global Administrator role usage: it enriches an incident wit
 requested the elevation, who approved it, and what the account did while elevated, then emails
 SOC. Pair it with `AnalyticsRules/GlobalAdminRoleUsage` for the NRT detection that feeds it.
 See `NotifySocTeams/README.md` for deployment and the required Graph `Mail.Send` grant.
+
+## `GlobalAdminDailyReport`
+
+`GlobalAdminDailyReport/azuredeploy.json` is a separate, schedule-driven playbook (a
+`Recurrence` trigger, not a Sentinel incident trigger) that emails SOC a daily digest at 9:30 AM
+Europe/Dublin of every Global Administrator PIM/role event from the previous calendar day.
+Deploy it alongside `NotifySocTeams` for a roll-up that isn't dependent on any single incident
+firing. See `GlobalAdminDailyReport/README.md`.

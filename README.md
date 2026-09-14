@@ -58,7 +58,8 @@ STAT-Secure/
 │   └── openapi.json
 ├── LogicApp/
 │   ├── azuredeploy.json           (sample end-to-end triage playbook)
-│   ├── NotifySocTeams/            (SOC email: Global Admin usage, who requested/approved it)
+│   ├── NotifySocTeams/            (per-incident SOC email: Global Admin usage, who requested/approved it)
+│   ├── GlobalAdminDailyReport/    (scheduled 9:30 AM daily SOC digest of the previous day's Global Admin activity)
 │   └── README.md
 ├── Deploy/
 │   ├── main.bicep
@@ -103,6 +104,9 @@ directory role.
   it, and **every activity the account performed** while Global Administrator, then emails SOC
   a summary - authenticated via its own managed identity's Graph `Mail.Send` permission, no
   stored mail credential.
+- **`LogicApp/GlobalAdminDailyReport`** - a standalone, schedule-driven playbook (no incident
+  needed) that emails SOC a daily 9:30 AM digest of every Global Administrator PIM/role event
+  from the previous day, so there's a roll-up even if an individual real-time alert is missed.
 
 See each folder's README for deployment steps and the validation checklist to run against your
 tenant's `AuditLogs` before enabling in production.
