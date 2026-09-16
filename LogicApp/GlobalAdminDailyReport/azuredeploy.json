@@ -44,9 +44,22 @@
       "metadata": {
         "description": "Windows time zone ID for the Recurrence trigger (e.g. 'GMT Standard Time' = Dublin/London, DST-aware). This must be kept in sync with the IANA name hardcoded in the KQL query's ReportTimeZone let-statement inside this file - see README.md if you change it."
       }
+    },
+    "UserAssignedIdentityName": {
+      "type": "string",
+      "defaultValue": "globaladmindailyreport-identity",
+      "metadata": {
+        "description": "Name of the user-assigned managed identity this template creates and assigns to the workflow, used to authenticate to azuremonitorlogs. Unlike a system-assigned identity, this identity's principalId - and any RBAC roles you grant it - survives redeploying or deleting/recreating the Logic App. Grant it Log Analytics Reader after deploying - see README.md."
+      }
     }
   },
   "resources": [
+    {
+      "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+      "apiVersion": "2023-01-31",
+      "name": "[parameters('UserAssignedIdentityName')]",
+      "location": "[resourceGroup().location]"
+    },
     {
       "type": "Microsoft.Web/connections",
       "apiVersion": "2016-06-01",
@@ -78,10 +91,14 @@
       "location": "[resourceGroup().location]",
       "dependsOn": [
         "[resourceId('Microsoft.Web/connections', 'azuremonitorlogs')]",
-        "[resourceId('Microsoft.Web/connections', 'office365')]"
+        "[resourceId('Microsoft.Web/connections', 'office365')]",
+        "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('UserAssignedIdentityName'))]"
       ],
       "identity": {
-        "type": "SystemAssigned"
+        "type": "UserAssigned",
+        "userAssignedIdentities": {
+          "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('UserAssignedIdentityName'))]": {}
+        }
       },
       "properties": {
         "state": "Enabled",
@@ -118,7 +135,7 @@
                 "host": { "connection": { "name": "@parameters('$connections')['azuremonitorlogs']['connectionId']" } },
                 "method": "post",
                 "path": "/queryData",
-                "authentication": { "type": "ManagedServiceIdentity" },
+                "authentication": { "type": "ManagedServiceIdentity", "identity": "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('UserAssignedIdentityName'))]" },
                 "queries": {
                   "subscriptions": "[parameters('SentinelSubscriptionId')]",
                   "resourcegroups": "[parameters('SentinelResourceGroup')]",
@@ -181,7 +198,8 @@
                 "id": "[concat('/subscriptions/', subscription().subscriptionId, '/providers/Microsoft.Web/locations/', resourceGroup().location, '/managedApis/azuremonitorlogs')]",
                 "connectionProperties": {
                   "authentication": {
-                    "type": "ManagedServiceIdentity"
+                    "type": "ManagedServiceIdentity",
+                    "identity": "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('UserAssignedIdentityName'))]"
                   }
                 }
               },
@@ -201,9 +219,17 @@
       "type": "string",
       "value": "[resourceId('Microsoft.Logic/workflows', parameters('PlaybookName'))]"
     },
-    "logicAppPrincipalId": {
+    "userAssignedIdentityResourceId": {
       "type": "string",
-      "value": "[reference(resourceId('Microsoft.Logic/workflows', parameters('PlaybookName')), '2019-05-01', 'full').identity.principalId]"
+      "value": "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('UserAssignedIdentityName'))]"
+    },
+    "userAssignedIdentityPrincipalId": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('UserAssignedIdentityName')), '2023-01-31').principalId]"
+    },
+    "userAssignedIdentityClientId": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('UserAssignedIdentityName')), '2023-01-31').clientId]"
     }
   }
 }

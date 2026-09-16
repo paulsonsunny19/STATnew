@@ -88,21 +88,55 @@ An unauthorized connection deploys fine but fails at run time with errors like
 authorized) - if you hit either after deploying this template, check the connection's status in
 the portal before assuming the template itself is broken.
 
-**If you authorize `azuresentinel`/`azuremonitorlogs` via managed identity**, that touches two
-separate places in this template, both required together (`WorkflowManagedIdentityConfigurationInvalid`
+## Identity: user-assigned, not system-assigned
+
+This workflow uses a **user-assigned managed identity** (`Microsoft.ManagedIdentity/userAssignedIdentities`,
+named by the `UserAssignedIdentityName` parameter, default `notifysocteams-identity`) that
+`azuredeploy.json` creates and attaches to the Logic App - not the workflow's own system-assigned
+identity. The difference matters operationally: a system-assigned identity's principal ID (and
+every RBAC role you granted it) is deleted the moment the Logic App is deleted, and a new one is
+issued on redeploy - so role assignments have to be redone every time. A user-assigned identity
+is its own standalone resource; redeploying or even deleting-and-recreating this Logic App
+doesn't touch it, so the RBAC grants below survive. It can also be reused across other
+playbooks later if you want one identity for the whole STAT-Secure automation surface, rather
+than one per playbook (this template creates a dedicated one by default - point
+`UserAssignedIdentityName` at an existing identity's name instead if you'd rather share one).
+
+After deploying, grant its principal ID (the `userAssignedIdentityPrincipalId` output, or
+`az identity show --name notifysocteams-identity --resource-group <rg> --query principalId`)
+the same roles you would have granted a system-assigned identity: `Microsoft Sentinel
+Contributor` + `Microsoft Sentinel Reader` for `azuresentinel`, `Log Analytics Reader` for
+`azuremonitorlogs`.
+
+**If you authorize `azuresentinel`/`azuremonitorlogs` via managed identity**, that touches three
+separate places in this template, all required together (`WorkflowManagedIdentityConfigurationInvalid`
 means one of them is missing):
 1. The **connection reference** itself, in `properties.parameters.$connections.value.<name>` -
-   needs a `connectionProperties: { authentication: { type: "ManagedServiceIdentity" } }` block.
-   This is what the error message's "missing 'authentication' property in connection properties"
-   is about - it's *not* referring to the action.
-2. Every **action** that calls the connection - needs
-   `"authentication": {"type": "ManagedServiceIdentity"}` in its `inputs`, alongside `host`.
+   needs a `connectionProperties: { authentication: { type: "ManagedServiceIdentity", identity:
+   "<UAI resource ID>" } }` block. This is what the error message's "missing 'authentication'
+   property in connection properties" is about - it's *not* referring to the action.
+2. Every **action** that calls the connection - needs `"authentication": {"type":
+   "ManagedServiceIdentity", "identity": "<UAI resource ID>"}` in its `inputs`, alongside `host`.
+3. The workflow resource's own `identity` block must list that same user-assigned identity under
+   `userAssignedIdentities` - otherwise the `identity` reference in (1) and (2) points at an
+   identity the workflow was never actually assigned, and authorization fails.
 
-This template sets both for `azuresentinel` and `azuremonitorlogs` (actions:
+The `identity` field in both places is always
+`[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('UserAssignedIdentityName'))]`
+- if you rename the parameter or swap in an existing identity, that expression still resolves
+correctly since it's parameterized, not hardcoded.
+
+This template sets all three for `azuresentinel` and `azuremonitorlogs` (actions:
 `Get_Incident_Alerts`, `Get_PIM_Request_Details`, `Get_GA_Activities_Performed`,
-`Add_Comment_To_Incident`) - if you add a new action against either connection, carry both over.
-`Send_Email_via_Office365`/`office365` deliberately has **neither**, since that connector can't
-be authorized via managed identity at all (see below).
+`Add_Comment_To_Incident`) - if you add a new action against either connection, carry all three
+over. `Send_Email_via_Office365`/`office365` deliberately has **none** of this, since that
+connector can't be authorized via managed identity (user-assigned or system-assigned) at all
+(see below) - it's authorized by signing in as a real mailbox regardless of identity type.
+
+**In the Azure portal, when authorizing `azuresentinel`/`azuremonitorlogs`**, choose "Connect
+with managed identity" and pick the **user-assigned identity** from the dropdown (it will be
+listed by the name you set in `UserAssignedIdentityName`) - not "System-assigned," since this
+workflow no longer has one.
 
 ## Sending mail: Office 365 Outlook connector, authorized as a shared mailbox
 
@@ -129,9 +163,10 @@ authorized the normal way: signing in as a real account.
 
 If you'd rather have a genuinely credential-free, managed-identity-only send path, the
 alternative is a raw HTTP action calling Microsoft Graph's `sendMail` endpoint directly
-(`authentication: ManagedServiceIdentity`) with the `Mail.Send` application permission granted
-via `Deploy/GrantNotifySocMailSendPermission.ps1` - that mechanism works because it's a generic
-HTTP call, not dependent on this specific connector's feature set. Ask if you want this playbook
+(`authentication: {type: ManagedServiceIdentity, identity: <UAI resource ID>}`) with the
+`Mail.Send` application permission granted to the user-assigned identity via
+`Deploy/GrantNotifySocMailSendPermission.ps1` - that mechanism works because it's a generic HTTP
+call, not dependent on this specific connector's feature set. Ask if you want this playbook
 reverted to that approach instead.
 
 ## Parameters
@@ -141,6 +176,7 @@ reverted to that approach instead.
 | `SocTeamEmail` | Distribution list / mailbox that receives the notification |
 | `SenderMailboxUpn` | Mailbox the notification is sent "from" via the Office 365 Outlook connector |
 | `ActivationWindowHours` | Lookback/lookahead window for "activities performed" (default 24h - align with your PIM policy's max activation duration) |
+| `UserAssignedIdentityName` | Name of the user-assigned managed identity created for this workflow (default `notifysocteams-identity`) - point at an existing identity's name to share one across playbooks instead |
 
 ## A note on the Azure Monitor Logs connector's response shape
 

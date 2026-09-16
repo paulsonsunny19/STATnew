@@ -32,15 +32,36 @@ the workspace (this is a separate connection resource from the one `NotifySocTea
 even though it's the same connector - each playbook deploys and authorizes its own); `office365`
 is covered below.
 
-**Managed-identity authorization touches two places, both required together**
+## Identity: user-assigned, not system-assigned
+
+Same as `NotifySocTeams`: this workflow uses a **user-assigned managed identity**
+(`Microsoft.ManagedIdentity/userAssignedIdentities`, named by `UserAssignedIdentityName`,
+default `globaladmindailyreport-identity`) that `azuredeploy.json` creates and attaches - not a
+system-assigned identity. Its principal ID (and any RBAC roles you grant it) survives
+redeploying or deleting/recreating this Logic App, since it's a standalone resource rather than
+tied to the workflow's lifecycle. Point `UserAssignedIdentityName` at an existing identity's
+name instead of the default if you'd rather share one identity across playbooks.
+
+After deploying, grant its principal ID (the `userAssignedIdentityPrincipalId` output, or
+`az identity show --name globaladmindailyreport-identity --resource-group <rg> --query
+principalId`) `Log Analytics Reader` on the workspace.
+
+**Managed-identity authorization touches three places, all required together**
 (`WorkflowManagedIdentityConfigurationInvalid` means one is missing):
 1. The **connection reference** in `properties.parameters.$connections.value.azuremonitorlogs`
-   needs `connectionProperties: { authentication: { type: "ManagedServiceIdentity" } }` - this
-   is what the error's "missing 'authentication' property in connection properties" refers to.
-2. The **action** that calls it (`Get_Yesterday_GA_Report`) needs
-   `"authentication": {"type": "ManagedServiceIdentity"}` in its `inputs`.
+   needs `connectionProperties: { authentication: { type: "ManagedServiceIdentity", identity:
+   "<UAI resource ID>" } }` - this is what the error's "missing 'authentication' property in
+   connection properties" refers to.
+2. The **action** that calls it (`Get_Yesterday_GA_Report`) needs `"authentication":
+   {"type": "ManagedServiceIdentity", "identity": "<UAI resource ID>"}` in its `inputs`.
+3. The workflow's own `identity` block must list that user-assigned identity under
+   `userAssignedIdentities` - otherwise (1) and (2) point at an identity the workflow was never
+   actually assigned.
 
-This template sets both; carry both over if you add another action against this connection.
+This template sets all three; carry them over if you add another action against this
+connection. **In the portal**, when authorizing `azuremonitorlogs`, choose "Connect with
+managed identity" and pick the user-assigned identity by name (not "System-assigned" - this
+workflow no longer has one).
 
 ## Sending mail: Office 365 Outlook connector, authorized as a shared mailbox
 
@@ -60,9 +81,10 @@ expected address.
 
 If you'd rather have a genuinely credential-free, managed-identity-only send path, the
 alternative is a raw HTTP action calling Microsoft Graph's `sendMail` endpoint directly
-(`authentication: ManagedServiceIdentity`) with the `Mail.Send` application permission granted
-via `Deploy/GrantNotifySocMailSendPermission.ps1`. Ask if you want this playbook reverted to
-that approach instead.
+(`authentication: {type: ManagedServiceIdentity, identity: <UAI resource ID>}`) with the
+`Mail.Send` application permission granted to the user-assigned identity via
+`Deploy/GrantNotifySocMailSendPermission.ps1`. Ask if you want this playbook reverted to that
+approach instead.
 
 ## Schedule
 
@@ -70,6 +92,7 @@ that approach instead.
 |---|---|---|
 | `ReportHour` / `ReportMinute` | 9 / 30 | Local time, in `ReportTimeZone` |
 | `ReportTimeZone` | `GMT Standard Time` | Windows time zone ID for the Logic App's `Recurrence` trigger (Dublin/London, DST-aware) |
+| `UserAssignedIdentityName` | `globaladmindailyreport-identity` | Name of the user-assigned managed identity created for this workflow - point at an existing identity's name to share one across playbooks |
 
 **Two time zone settings must be kept in sync**, because they're read by two different engines:
 - The ARM parameter `ReportTimeZone` (`"GMT Standard Time"`, a **Windows** time zone ID) - read
