@@ -116,7 +116,8 @@
               "inputs": {
                 "host": { "connection": { "name": "@parameters('$connections')['azuresentinel']['connectionId']" } },
                 "method": "post",
-                "path": "/Incidents/@{encodeURIComponent(last(split(triggerBody()?['IncidentARMId'], '/')))}/alerts"
+                "path": "/Incidents/@{encodeURIComponent(last(split(triggerBody()?['IncidentARMId'], '/')))}/alerts",
+                "authentication": { "type": "ManagedServiceIdentity" }
               },
               "runAfter": {}
             },
@@ -136,6 +137,7 @@
                 "host": { "connection": { "name": "@parameters('$connections')['azuremonitorlogs']['connectionId']" } },
                 "method": "post",
                 "path": "/queryData",
+                "authentication": { "type": "ManagedServiceIdentity" },
                 "queries": {
                   "subscriptions": "[parameters('SentinelSubscriptionId')]",
                   "resourcegroups": "[parameters('SentinelResourceGroup')]",
@@ -155,6 +157,7 @@
                 "host": { "connection": { "name": "@parameters('$connections')['azuremonitorlogs']['connectionId']" } },
                 "method": "post",
                 "path": "/queryData",
+                "authentication": { "type": "ManagedServiceIdentity" },
                 "queries": {
                   "subscriptions": "[parameters('SentinelSubscriptionId')]",
                   "resourcegroups": "[parameters('SentinelResourceGroup')]",
@@ -195,6 +198,7 @@
                 "host": { "connection": { "name": "@parameters('$connections')['azuresentinel']['connectionId']" } },
                 "method": "post",
                 "path": "/Incidents/@{encodeURIComponent(last(split(triggerBody()?['IncidentARMId'], '/')))}/comments",
+                "authentication": { "type": "ManagedServiceIdentity" },
                 "body": {
                   "message": "@{concat('NotifySocTeams: SOC notified by email at ', parameters('SocTeamEmail'), ' with Global Administrator PIM/assignment detail for ', outputs('Parse_GA_Alert_Details')?['GlobalAdminAccount'], '.')}"
                 }

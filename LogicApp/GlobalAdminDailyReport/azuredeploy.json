@@ -118,6 +118,7 @@
                 "host": { "connection": { "name": "@parameters('$connections')['azuremonitorlogs']['connectionId']" } },
                 "method": "post",
                 "path": "/queryData",
+                "authentication": { "type": "ManagedServiceIdentity" },
                 "queries": {
                   "subscriptions": "[parameters('SentinelSubscriptionId')]",
                   "resourcegroups": "[parameters('SentinelResourceGroup')]",

@@ -88,6 +88,16 @@ An unauthorized connection deploys fine but fails at run time with errors like
 authorized) - if you hit either after deploying this template, check the connection's status in
 the portal before assuming the template itself is broken.
 
+**If you authorize `azuresentinel`/`azuremonitorlogs` via managed identity**, that alone isn't
+enough - every *action* that calls them must also declare
+`"authentication": {"type": "ManagedServiceIdentity"}` in its `inputs`, or you'll hit
+`The workflow connection parameter '...' is not valid ... configured to support managed
+identity but the connection parameter is either missing 'authentication' ...`. This template
+already sets that on `Get_Incident_Alerts`, `Get_PIM_Request_Details`,
+`Get_GA_Activities_Performed`, and `Add_Comment_To_Incident` - if you add a new action against
+either connection, carry it over. `Send_Email_via_Office365` deliberately does **not** have it,
+since `office365` can't be authorized via managed identity (see below).
+
 ## Sending mail: Office 365 Outlook connector, authorized as a shared mailbox
 
 `Send_Email_via_Office365` calls the Office 365 Outlook connector's `SendEmailV2` operation.

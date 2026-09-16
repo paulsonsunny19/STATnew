@@ -27,9 +27,17 @@ az deployment group create \
 `azuredeploy.json` creates the `azuremonitorlogs` and `office365` `Microsoft.Web/connections`
 resource shells for you - deploying no longer fails with `ApiConnectionNotFound`. After
 deploying, open each in the Azure portal (same resource group) and authorize it:
-`azuremonitorlogs` needs a sign-in with `Log Analytics Reader` on the workspace (this is a
-separate connection resource from the one `NotifySocTeams` creates, even though it's the same
-connector - each playbook deploys and authorizes its own); `office365` is covered below.
+`azuremonitorlogs` via **"Connect with managed identity"**, granted `Log Analytics Reader` on
+the workspace (this is a separate connection resource from the one `NotifySocTeams` creates,
+even though it's the same connector - each playbook deploys and authorizes its own); `office365`
+is covered below.
+
+**Authorizing the connection via managed identity isn't the whole story** - the action that
+calls it (`Get_Yesterday_GA_Report`) must also declare
+`"authentication": {"type": "ManagedServiceIdentity"}` in its `inputs`, or you'll hit `The
+workflow connection parameter 'azuremonitorlogs' is not valid ... configured to support managed
+identity but the connection parameter is either missing 'authentication' ...`. This template
+already sets that; carry it over if you add another action against this connection.
 
 ## Sending mail: Office 365 Outlook connector, authorized as a shared mailbox
 
