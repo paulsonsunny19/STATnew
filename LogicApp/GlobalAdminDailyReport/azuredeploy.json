@@ -178,7 +178,12 @@
               "azuremonitorlogs": {
                 "connectionId": "[resourceId('Microsoft.Web/connections', 'azuremonitorlogs')]",
                 "connectionName": "azuremonitorlogs",
-                "id": "[concat('/subscriptions/', subscription().subscriptionId, '/providers/Microsoft.Web/locations/', resourceGroup().location, '/managedApis/azuremonitorlogs')]"
+                "id": "[concat('/subscriptions/', subscription().subscriptionId, '/providers/Microsoft.Web/locations/', resourceGroup().location, '/managedApis/azuremonitorlogs')]",
+                "connectionProperties": {
+                  "authentication": {
+                    "type": "ManagedServiceIdentity"
+                  }
+                }
               },
               "office365": {
                 "connectionId": "[resourceId('Microsoft.Web/connections', 'office365')]",

@@ -88,15 +88,21 @@ An unauthorized connection deploys fine but fails at run time with errors like
 authorized) - if you hit either after deploying this template, check the connection's status in
 the portal before assuming the template itself is broken.
 
-**If you authorize `azuresentinel`/`azuremonitorlogs` via managed identity**, that alone isn't
-enough - every *action* that calls them must also declare
-`"authentication": {"type": "ManagedServiceIdentity"}` in its `inputs`, or you'll hit
-`The workflow connection parameter '...' is not valid ... configured to support managed
-identity but the connection parameter is either missing 'authentication' ...`. This template
-already sets that on `Get_Incident_Alerts`, `Get_PIM_Request_Details`,
-`Get_GA_Activities_Performed`, and `Add_Comment_To_Incident` - if you add a new action against
-either connection, carry it over. `Send_Email_via_Office365` deliberately does **not** have it,
-since `office365` can't be authorized via managed identity (see below).
+**If you authorize `azuresentinel`/`azuremonitorlogs` via managed identity**, that touches two
+separate places in this template, both required together (`WorkflowManagedIdentityConfigurationInvalid`
+means one of them is missing):
+1. The **connection reference** itself, in `properties.parameters.$connections.value.<name>` -
+   needs a `connectionProperties: { authentication: { type: "ManagedServiceIdentity" } }` block.
+   This is what the error message's "missing 'authentication' property in connection properties"
+   is about - it's *not* referring to the action.
+2. Every **action** that calls the connection - needs
+   `"authentication": {"type": "ManagedServiceIdentity"}` in its `inputs`, alongside `host`.
+
+This template sets both for `azuresentinel` and `azuremonitorlogs` (actions:
+`Get_Incident_Alerts`, `Get_PIM_Request_Details`, `Get_GA_Activities_Performed`,
+`Add_Comment_To_Incident`) - if you add a new action against either connection, carry both over.
+`Send_Email_via_Office365`/`office365` deliberately has **neither**, since that connector can't
+be authorized via managed identity at all (see below).
 
 ## Sending mail: Office 365 Outlook connector, authorized as a shared mailbox
 

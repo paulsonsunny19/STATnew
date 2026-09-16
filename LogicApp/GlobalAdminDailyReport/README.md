@@ -32,12 +32,15 @@ the workspace (this is a separate connection resource from the one `NotifySocTea
 even though it's the same connector - each playbook deploys and authorizes its own); `office365`
 is covered below.
 
-**Authorizing the connection via managed identity isn't the whole story** - the action that
-calls it (`Get_Yesterday_GA_Report`) must also declare
-`"authentication": {"type": "ManagedServiceIdentity"}` in its `inputs`, or you'll hit `The
-workflow connection parameter 'azuremonitorlogs' is not valid ... configured to support managed
-identity but the connection parameter is either missing 'authentication' ...`. This template
-already sets that; carry it over if you add another action against this connection.
+**Managed-identity authorization touches two places, both required together**
+(`WorkflowManagedIdentityConfigurationInvalid` means one is missing):
+1. The **connection reference** in `properties.parameters.$connections.value.azuremonitorlogs`
+   needs `connectionProperties: { authentication: { type: "ManagedServiceIdentity" } }` - this
+   is what the error's "missing 'authentication' property in connection properties" refers to.
+2. The **action** that calls it (`Get_Yesterday_GA_Report`) needs
+   `"authentication": {"type": "ManagedServiceIdentity"}` in its `inputs`.
+
+This template sets both; carry both over if you add another action against this connection.
 
 ## Sending mail: Office 365 Outlook connector, authorized as a shared mailbox
 
