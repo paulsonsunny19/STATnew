@@ -1,0 +1,1203 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "title": "External user SharePoint / OneDrive file activity",
+    "description": "Two playbooks: (1) keeps a Sentinel watchlist of external users with SharePoint/OneDrive file activity, (2) alerts (email + incident) on external users not seen before. Graph and Sentinel calls use a user-assigned managed identity; email uses the Office 365 Outlook connector."
+  },
+  "parameters": {
+    "PlaybookNamePrefix": {
+      "type": "string",
+      "defaultValue": "SOC",
+      "metadata": {
+        "description": "Prefix for the Logic App and connection names."
+      }
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]"
+    },
+    "WorkspaceName": {
+      "type": "string",
+      "metadata": {
+        "description": "Name of the Log Analytics workspace that has Microsoft Sentinel enabled."
+      }
+    },
+    "WorkspaceResourceGroup": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().name]"
+    },
+    "WorkspaceSubscriptionId": {
+      "type": "string",
+      "defaultValue": "[subscription().subscriptionId]"
+    },
+    "CreateManagedIdentity": {
+      "type": "bool",
+      "defaultValue": true,
+      "metadata": {
+        "description": "true = create a new user-assigned managed identity in this resource group. false = use an existing one."
+      }
+    },
+    "ManagedIdentityName": {
+      "type": "string",
+      "defaultValue": "uami-sentinel-playbooks"
+    },
+    "ManagedIdentityResourceGroup": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().name]",
+      "metadata": {
+        "description": "Only used when CreateManagedIdentity = false."
+      }
+    },
+    "AssignSentinelContributorRole": {
+      "type": "bool",
+      "defaultValue": true,
+      "metadata": {
+        "description": "Grant the identity Microsoft Sentinel Contributor on the workspace (needs Owner / User Access Administrator). Set false if it already has the role."
+      }
+    },
+    "WatchlistAlias": {
+      "type": "string",
+      "defaultValue": "ExternalFileActivity"
+    },
+    "LookbackDays": {
+      "type": "int",
+      "defaultValue": 30,
+      "minValue": 1,
+      "maxValue": 30,
+      "metadata": {
+        "description": "How far back to look for external user activity (Graph hunting keeps 30 days)."
+      }
+    },
+    "WatchlistSyncIntervalHours": {
+      "type": "int",
+      "defaultValue": 12,
+      "minValue": 1,
+      "maxValue": 24
+    },
+    "DetectionWindowHours": {
+      "type": "int",
+      "defaultValue": 2,
+      "minValue": 1,
+      "maxValue": 24,
+      "metadata": {
+        "description": "A user whose first activity is within this window is a candidate. Keep it larger than the 1-hour schedule to absorb ingestion delay."
+      }
+    },
+    "NotificationRecipients": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Semicolon-separated To addresses. Leave empty to disable the email."
+      }
+    },
+    "NotificationCc": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Semicolon-separated Cc addresses (optional)."
+      }
+    },
+    "SocTeamName": {
+      "type": "string",
+      "defaultValue": "SOC Team",
+      "metadata": {
+        "description": "Used in the email header, subject and sign-off."
+      }
+    },
+    "IncidentMode": {
+      "type": "string",
+      "defaultValue": "Closed",
+      "allowedValues": [
+        "None",
+        "New",
+        "Closed"
+      ],
+      "metadata": {
+        "description": "None = no incident. New = open incident for triage. Closed = informational record only."
+      }
+    },
+    "IncidentSeverity": {
+      "type": "string",
+      "defaultValue": "Informational",
+      "allowedValues": [
+        "Informational",
+        "Low",
+        "Medium",
+        "High"
+      ]
+    },
+    "Tags": {
+      "type": "object",
+      "defaultValue": {
+        "Application": "Sentinel"
+      }
+    }
+  },
+  "variables": {
+    "syncPlaybookName": "[concat(parameters('PlaybookNamePrefix'), '-ExternalFileActivity-WatchlistSync')]",
+    "alertPlaybookName": "[concat(parameters('PlaybookNamePrefix'), '-ExternalFileActivity-NewUserAlert')]",
+    "office365ConnectionName": "[concat('office365-', parameters('PlaybookNamePrefix'), '-ExternalFileActivity')]",
+    "office365ApiId": "[subscriptionResourceId('Microsoft.Web/locations/managedApis', parameters('location'), 'office365')]",
+    "identityResourceGroup": "[if(parameters('CreateManagedIdentity'), resourceGroup().name, parameters('ManagedIdentityResourceGroup'))]",
+    "identityId": "[resourceId(subscription().subscriptionId, variables('identityResourceGroup'), 'Microsoft.ManagedIdentity/userAssignedIdentities', parameters('ManagedIdentityName'))]",
+    "workspaceResourceId": "[resourceId(parameters('WorkspaceSubscriptionId'), parameters('WorkspaceResourceGroup'), 'Microsoft.OperationalInsights/workspaces', parameters('WorkspaceName'))]",
+    "emailBodyBase": {
+      "To": "[parameters('NotificationRecipients')]",
+      "Subject": "[concat(parameters('SocTeamName'), ': @{length(variables(''NewUsers''))} new external user(s) accessing SharePoint / OneDrive files')]",
+      "Body": "@{outputs('Compose_Email_Body')}",
+      "Importance": "Normal",
+      "Attachments": [
+        {
+          "Name": "external-file-activity.csv",
+          "ContentBytes": "@{base64(body('Create_Activity_CSV'))}"
+        }
+      ]
+    },
+    "emailBody": "[if(empty(trim(parameters('NotificationCc'))), variables('emailBodyBase'), union(variables('emailBodyBase'), createObject('Cc', parameters('NotificationCc'))))]",
+    "incidentBase": {
+      "title": "[concat(parameters('SocTeamName'), ' - New external user(s) accessing SharePoint / OneDrive files')]",
+      "description": "@{length(variables('NewUsers'))} external user(s) accessed SharePoint / OneDrive files for the first time in the last @{parameters('LookbackDays')} days: @{join(take(body('Select_UserIds'), 50), ', ')}. They have been added to the @{parameters('WatchlistAlias')} watchlist.",
+      "severity": "[parameters('IncidentSeverity')]",
+      "labels": [
+        {
+          "labelName": "ExternalFileActivity",
+          "labelType": "User"
+        },
+        {
+          "labelName": "Playbook",
+          "labelType": "User"
+        }
+      ]
+    },
+    "incidentStatus": "[if(equals(parameters('IncidentMode'), 'Closed'), createObject('status', 'Closed', 'classification', 'Undetermined', 'classificationComment', 'Informational record created by playbook; notification email sent.'), createObject('status', 'New'))]",
+    "incidentProperties": "[union(variables('incidentBase'), variables('incidentStatus'))]"
+  },
+  "resources": [
+    {
+      "condition": "[parameters('CreateManagedIdentity')]",
+      "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+      "apiVersion": "2023-01-31",
+      "name": "[parameters('ManagedIdentityName')]",
+      "location": "[parameters('location')]",
+      "tags": "[parameters('Tags')]"
+    },
+    {
+      "condition": "[parameters('AssignSentinelContributorRole')]",
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2022-09-01",
+      "name": "[concat('sentinel-role-', uniqueString(variables('identityId'), variables('workspaceResourceId')))]",
+      "subscriptionId": "[parameters('WorkspaceSubscriptionId')]",
+      "resourceGroup": "[parameters('WorkspaceResourceGroup')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('ManagedIdentityName'))]"
+      ],
+      "properties": {
+        "mode": "Incremental",
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "parameters": {
+          "workspaceName": {
+            "value": "[parameters('WorkspaceName')]"
+          },
+          "principalId": {
+            "value": "[reference(variables('identityId'), '2023-01-31').principalId]"
+          },
+          "identityId": {
+            "value": "[variables('identityId')]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "parameters": {
+            "workspaceName": {
+              "type": "string"
+            },
+            "principalId": {
+              "type": "string"
+            },
+            "identityId": {
+              "type": "string"
+            }
+          },
+          "resources": [
+            {
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "scope": "[concat('Microsoft.OperationalInsights/workspaces/', parameters('workspaceName'))]",
+              "name": "[guid(resourceId('Microsoft.OperationalInsights/workspaces', parameters('workspaceName')), parameters('identityId'), 'ab8e14d6-4a74-4a29-9ba8-549422addade')]",
+              "properties": {
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'ab8e14d6-4a74-4a29-9ba8-549422addade')]",
+                "principalId": "[parameters('principalId')]",
+                "principalType": "ServicePrincipal"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Web/connections",
+      "apiVersion": "2016-06-01",
+      "name": "[variables('office365ConnectionName')]",
+      "location": "[parameters('location')]",
+      "tags": "[parameters('Tags')]",
+      "properties": {
+        "displayName": "[variables('office365ConnectionName')]",
+        "api": {
+          "id": "[variables('office365ApiId')]"
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Logic/workflows",
+      "apiVersion": "2019-05-01",
+      "name": "[variables('syncPlaybookName')]",
+      "location": "[parameters('location')]",
+      "tags": "[parameters('Tags')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('ManagedIdentityName'))]"
+      ],
+      "identity": {
+        "type": "UserAssigned",
+        "userAssignedIdentities": {
+          "[variables('identityId')]": {}
+        }
+      },
+      "properties": {
+        "state": "Enabled",
+        "definition": {
+          "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+          "contentVersion": "1.0.0.0",
+          "parameters": {
+            "$connections": {
+              "defaultValue": {},
+              "type": "Object"
+            },
+            "WorkspaceResourceId": {
+              "defaultValue": "",
+              "type": "String"
+            },
+            "WatchlistAlias": {
+              "defaultValue": "ExternalFileActivity",
+              "type": "String"
+            },
+            "LookbackDays": {
+              "defaultValue": 30,
+              "type": "Int"
+            }
+          },
+          "triggers": {
+            "Recurrence": {
+              "type": "Recurrence",
+              "recurrence": {
+                "frequency": "Hour",
+                "interval": "[parameters('WatchlistSyncIntervalHours')]"
+              }
+            }
+          },
+          "actions": {
+            "Get_Watchlist": {
+              "type": "Http",
+              "runAfter": {},
+              "inputs": {
+                "method": "GET",
+                "uri": "https://management.azure.com@{parameters('WorkspaceResourceId')}/providers/Microsoft.SecurityInsights/watchlists/@{encodeURIComponent(parameters('WatchlistAlias'))}?api-version=2024-03-01",
+                "authentication": {
+                  "type": "ManagedServiceIdentity",
+                  "identity": "[variables('identityId')]",
+                  "audience": "https://management.azure.com"
+                },
+                "retryPolicy": {
+                  "type": "exponential",
+                  "count": 4,
+                  "interval": "PT10S"
+                }
+              }
+            },
+            "Ensure_Watchlist": {
+              "type": "If",
+              "runAfter": {
+                "Get_Watchlist": [
+                  "Succeeded",
+                  "Failed"
+                ]
+              },
+              "expression": {
+                "and": [
+                  {
+                    "equals": [
+                      "@outputs('Get_Watchlist')?['statusCode']",
+                      404
+                    ]
+                  }
+                ]
+              },
+              "actions": {
+                "Create_Watchlist": {
+                  "type": "Http",
+                  "runAfter": {},
+                  "inputs": {
+                    "method": "PUT",
+                    "uri": "https://management.azure.com@{parameters('WorkspaceResourceId')}/providers/Microsoft.SecurityInsights/watchlists/@{encodeURIComponent(parameters('WatchlistAlias'))}?api-version=2024-03-01",
+                    "authentication": {
+                      "type": "ManagedServiceIdentity",
+                      "identity": "[variables('identityId')]",
+                      "audience": "https://management.azure.com"
+                    },
+                    "retryPolicy": {
+                      "type": "exponential",
+                      "count": 4,
+                      "interval": "PT10S"
+                    },
+                    "body": {
+                      "properties": {
+                        "displayName": "@{parameters('WatchlistAlias')}",
+                        "description": "External (guest) users with SharePoint / OneDrive file activity. Maintained by Logic App playbooks.",
+                        "provider": "Custom",
+                        "source": "Logic App playbook",
+                        "itemsSearchKey": "UserId",
+                        "contentType": "text/csv",
+                        "numberOfLinesToSkip": 0,
+                        "rawContent": "UserId,DisplayName,FirstSeen,LastSeen,RecentEvents,RecentFiles,UpdatedBy\r\nseed@watchlist.invalid,Seed row - safe to ignore,,,0,0,Playbook\r\n"
+                      }
+                    },
+                    "headers": {
+                      "Content-Type": "application/json"
+                    }
+                  }
+                },
+                "Wait_For_Watchlist_Provisioning": {
+                  "type": "Wait",
+                  "runAfter": {
+                    "Create_Watchlist": [
+                      "Succeeded"
+                    ]
+                  },
+                  "inputs": {
+                    "interval": {
+                      "count": 1,
+                      "unit": "Minute"
+                    }
+                  }
+                }
+              },
+              "else": {
+                "actions": {
+                  "Watchlist_Lookup_Error": {
+                    "type": "If",
+                    "expression": {
+                      "and": [
+                        {
+                          "not": {
+                            "equals": [
+                              "@outputs('Get_Watchlist')?['statusCode']",
+                              200
+                            ]
+                          }
+                        }
+                      ]
+                    },
+                    "actions": {
+                      "Terminate_Watchlist_Error": {
+                        "type": "Terminate",
+                        "inputs": {
+                          "runStatus": "Failed",
+                          "runError": {
+                            "code": "@{outputs('Get_Watchlist')?['statusCode']}",
+                            "message": "Could not read the Sentinel watchlist. Check the managed identity has Microsoft Sentinel Contributor on the workspace."
+                          }
+                        }
+                      }
+                    },
+                    "else": {
+                      "actions": {}
+                    }
+                  }
+                }
+              }
+            },
+            "Run_Sync_Query": {
+              "type": "Http",
+              "runAfter": {
+                "Ensure_Watchlist": [
+                  "Succeeded"
+                ]
+              },
+              "inputs": {
+                "method": "POST",
+                "uri": "https://graph.microsoft.com/v1.0/security/runHuntingQuery",
+                "authentication": {
+                  "type": "ManagedServiceIdentity",
+                  "identity": "[variables('identityId')]",
+                  "audience": "https://graph.microsoft.com"
+                },
+                "retryPolicy": {
+                  "type": "exponential",
+                  "count": 4,
+                  "interval": "PT10S"
+                },
+                "body": {
+                  "Query": "let lookback = @{parameters('LookbackDays')}d;\nCloudAppEvents\n| where Timestamp > ago(lookback)\n| where Application in (\"Microsoft SharePoint Online\", \"Microsoft OneDrive for Business\", \"Microsoft Office Online\")\n| where isnotempty(ObjectType)\n| extend UserId = tolower(tostring(RawEventData.UserId))\n| where UserId contains \"#ext#\" or UserId has \"guest\"\n| summarize DisplayName = take_any(AccountDisplayName), FirstSeen = min(Timestamp), LastSeen = max(Timestamp),\n            EventCount = count(), FileCount = dcount(ObjectName) by UserId\n| extend h = hash_sha256(UserId)\n| extend ItemId = strcat(substring(h, 0, 8), \"-\", substring(h, 8, 4), \"-\", substring(h, 12, 4), \"-\", substring(h, 16, 4), \"-\", substring(h, 20, 12))\n| project-away h"
+                },
+                "headers": {
+                  "Content-Type": "application/json"
+                }
+              }
+            },
+            "For_each_user": {
+              "type": "Foreach",
+              "runAfter": {
+                "Run_Sync_Query": [
+                  "Succeeded"
+                ]
+              },
+              "foreach": "@coalesce(body('Run_Sync_Query')?['results'], json('[]'))",
+              "runtimeConfiguration": {
+                "concurrency": {
+                  "repetitions": 10
+                }
+              },
+              "actions": {
+                "Get_Existing_Item": {
+                  "type": "Http",
+                  "runAfter": {},
+                  "inputs": {
+                    "method": "GET",
+                    "uri": "https://management.azure.com@{parameters('WorkspaceResourceId')}/providers/Microsoft.SecurityInsights/watchlists/@{encodeURIComponent(parameters('WatchlistAlias'))}/watchlistItems/@{items('For_each_user')?['ItemId']}?api-version=2024-03-01",
+                    "authentication": {
+                      "type": "ManagedServiceIdentity",
+                      "identity": "[variables('identityId')]",
+                      "audience": "https://management.azure.com"
+                    },
+                    "retryPolicy": {
+                      "type": "none"
+                    }
+                  }
+                },
+                "Upsert_Watchlist_Item": {
+                  "type": "Http",
+                  "runAfter": {
+                    "Get_Existing_Item": [
+                      "Succeeded",
+                      "Failed"
+                    ]
+                  },
+                  "inputs": {
+                    "method": "PUT",
+                    "uri": "https://management.azure.com@{parameters('WorkspaceResourceId')}/providers/Microsoft.SecurityInsights/watchlists/@{encodeURIComponent(parameters('WatchlistAlias'))}/watchlistItems/@{items('For_each_user')?['ItemId']}?api-version=2024-03-01",
+                    "authentication": {
+                      "type": "ManagedServiceIdentity",
+                      "identity": "[variables('identityId')]",
+                      "audience": "https://management.azure.com"
+                    },
+                    "retryPolicy": {
+                      "type": "exponential",
+                      "count": 4,
+                      "interval": "PT10S"
+                    },
+                    "body": {
+                      "properties": {
+                        "itemsKeyValue": {
+                          "UserId": "@{items('For_each_user')?['UserId']}",
+                          "DisplayName": "@{items('For_each_user')?['DisplayName']}",
+                          "FirstSeen": "@{if(less(ticks(if(empty(body('Get_Existing_Item')?['properties']?['itemsKeyValue']?['FirstSeen']), items('For_each_user')?['FirstSeen'], body('Get_Existing_Item')?['properties']?['itemsKeyValue']?['FirstSeen'])), ticks(items('For_each_user')?['FirstSeen'])), if(empty(body('Get_Existing_Item')?['properties']?['itemsKeyValue']?['FirstSeen']), items('For_each_user')?['FirstSeen'], body('Get_Existing_Item')?['properties']?['itemsKeyValue']?['FirstSeen']), items('For_each_user')?['FirstSeen'])}",
+                          "LastSeen": "@{items('For_each_user')?['LastSeen']}",
+                          "RecentEvents": "@{items('For_each_user')?['EventCount']}",
+                          "RecentFiles": "@{items('For_each_user')?['FileCount']}",
+                          "UpdatedBy": "Watchlist sync"
+                        }
+                      }
+                    },
+                    "headers": {
+                      "Content-Type": "application/json"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "outputs": {}
+        },
+        "parameters": {
+          "WorkspaceResourceId": {
+            "value": "[variables('workspaceResourceId')]"
+          },
+          "WatchlistAlias": {
+            "value": "[parameters('WatchlistAlias')]"
+          },
+          "LookbackDays": {
+            "value": "[parameters('LookbackDays')]"
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Logic/workflows",
+      "apiVersion": "2019-05-01",
+      "name": "[variables('alertPlaybookName')]",
+      "location": "[parameters('location')]",
+      "tags": "[parameters('Tags')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('ManagedIdentityName'))]",
+        "[resourceId('Microsoft.Web/connections', variables('office365ConnectionName'))]"
+      ],
+      "identity": {
+        "type": "UserAssigned",
+        "userAssignedIdentities": {
+          "[variables('identityId')]": {}
+        }
+      },
+      "properties": {
+        "state": "Enabled",
+        "definition": {
+          "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+          "contentVersion": "1.0.0.0",
+          "parameters": {
+            "$connections": {
+              "defaultValue": {},
+              "type": "Object"
+            },
+            "WorkspaceResourceId": {
+              "defaultValue": "",
+              "type": "String"
+            },
+            "WatchlistAlias": {
+              "defaultValue": "ExternalFileActivity",
+              "type": "String"
+            },
+            "LookbackDays": {
+              "defaultValue": 30,
+              "type": "Int"
+            },
+            "DetectionWindowHours": {
+              "defaultValue": 2,
+              "type": "Int"
+            },
+            "SocTeamName": {
+              "defaultValue": "SOC Team",
+              "type": "String"
+            }
+          },
+          "triggers": {
+            "Recurrence": {
+              "type": "Recurrence",
+              "recurrence": {
+                "frequency": "Hour",
+                "interval": 1
+              }
+            }
+          },
+          "actions": {
+            "Initialize_NewUsers": {
+              "type": "InitializeVariable",
+              "runAfter": {},
+              "inputs": {
+                "variables": [
+                  {
+                    "name": "NewUsers",
+                    "type": "array"
+                  }
+                ]
+              }
+            },
+            "Initialize_LookupErrors": {
+              "type": "InitializeVariable",
+              "runAfter": {
+                "Initialize_NewUsers": [
+                  "Succeeded"
+                ]
+              },
+              "inputs": {
+                "variables": [
+                  {
+                    "name": "LookupErrors",
+                    "type": "array"
+                  }
+                ]
+              }
+            },
+            "Get_Watchlist": {
+              "type": "Http",
+              "runAfter": {
+                "Initialize_LookupErrors": [
+                  "Succeeded"
+                ]
+              },
+              "inputs": {
+                "method": "GET",
+                "uri": "https://management.azure.com@{parameters('WorkspaceResourceId')}/providers/Microsoft.SecurityInsights/watchlists/@{encodeURIComponent(parameters('WatchlistAlias'))}?api-version=2024-03-01",
+                "authentication": {
+                  "type": "ManagedServiceIdentity",
+                  "identity": "[variables('identityId')]",
+                  "audience": "https://management.azure.com"
+                },
+                "retryPolicy": {
+                  "type": "exponential",
+                  "count": 4,
+                  "interval": "PT10S"
+                }
+              }
+            },
+            "Ensure_Watchlist": {
+              "type": "If",
+              "runAfter": {
+                "Get_Watchlist": [
+                  "Succeeded",
+                  "Failed"
+                ]
+              },
+              "expression": {
+                "and": [
+                  {
+                    "equals": [
+                      "@outputs('Get_Watchlist')?['statusCode']",
+                      404
+                    ]
+                  }
+                ]
+              },
+              "actions": {
+                "Create_Watchlist": {
+                  "type": "Http",
+                  "runAfter": {},
+                  "inputs": {
+                    "method": "PUT",
+                    "uri": "https://management.azure.com@{parameters('WorkspaceResourceId')}/providers/Microsoft.SecurityInsights/watchlists/@{encodeURIComponent(parameters('WatchlistAlias'))}?api-version=2024-03-01",
+                    "authentication": {
+                      "type": "ManagedServiceIdentity",
+                      "identity": "[variables('identityId')]",
+                      "audience": "https://management.azure.com"
+                    },
+                    "retryPolicy": {
+                      "type": "exponential",
+                      "count": 4,
+                      "interval": "PT10S"
+                    },
+                    "body": {
+                      "properties": {
+                        "displayName": "@{parameters('WatchlistAlias')}",
+                        "description": "External (guest) users with SharePoint / OneDrive file activity. Maintained by Logic App playbooks.",
+                        "provider": "Custom",
+                        "source": "Logic App playbook",
+                        "itemsSearchKey": "UserId",
+                        "contentType": "text/csv",
+                        "numberOfLinesToSkip": 0,
+                        "rawContent": "UserId,DisplayName,FirstSeen,LastSeen,RecentEvents,RecentFiles,UpdatedBy\r\nseed@watchlist.invalid,Seed row - safe to ignore,,,0,0,Playbook\r\n"
+                      }
+                    },
+                    "headers": {
+                      "Content-Type": "application/json"
+                    }
+                  }
+                },
+                "Wait_For_Watchlist_Provisioning": {
+                  "type": "Wait",
+                  "runAfter": {
+                    "Create_Watchlist": [
+                      "Succeeded"
+                    ]
+                  },
+                  "inputs": {
+                    "interval": {
+                      "count": 1,
+                      "unit": "Minute"
+                    }
+                  }
+                }
+              },
+              "else": {
+                "actions": {
+                  "Watchlist_Lookup_Error": {
+                    "type": "If",
+                    "expression": {
+                      "and": [
+                        {
+                          "not": {
+                            "equals": [
+                              "@outputs('Get_Watchlist')?['statusCode']",
+                              200
+                            ]
+                          }
+                        }
+                      ]
+                    },
+                    "actions": {
+                      "Terminate_Watchlist_Error": {
+                        "type": "Terminate",
+                        "inputs": {
+                          "runStatus": "Failed",
+                          "runError": {
+                            "code": "@{outputs('Get_Watchlist')?['statusCode']}",
+                            "message": "Could not read the Sentinel watchlist. Check the managed identity has Microsoft Sentinel Contributor on the workspace."
+                          }
+                        }
+                      }
+                    },
+                    "else": {
+                      "actions": {}
+                    }
+                  }
+                }
+              }
+            },
+            "Run_Detection_Query": {
+              "type": "Http",
+              "runAfter": {
+                "Ensure_Watchlist": [
+                  "Succeeded"
+                ]
+              },
+              "inputs": {
+                "method": "POST",
+                "uri": "https://graph.microsoft.com/v1.0/security/runHuntingQuery",
+                "authentication": {
+                  "type": "ManagedServiceIdentity",
+                  "identity": "[variables('identityId')]",
+                  "audience": "https://graph.microsoft.com"
+                },
+                "retryPolicy": {
+                  "type": "exponential",
+                  "count": 4,
+                  "interval": "PT10S"
+                },
+                "body": {
+                  "Query": "let lookback = @{parameters('LookbackDays')}d;\nlet window = @{parameters('DetectionWindowHours')}h;\nCloudAppEvents\n| where Timestamp > ago(lookback)\n| where Application in (\"Microsoft SharePoint Online\", \"Microsoft OneDrive for Business\", \"Microsoft Office Online\")\n| where isnotempty(ObjectType)\n| extend UserId = tolower(tostring(RawEventData.UserId))\n| where UserId contains \"#ext#\" or UserId has \"guest\"\n| summarize DisplayName = take_any(AccountDisplayName), FirstSeen = min(Timestamp), LastSeen = max(Timestamp),\n            EventCount = count(), FileCount = dcount(ObjectName) by UserId\n| where FirstSeen > ago(window)\n| extend h = hash_sha256(UserId)\n| extend ItemId = strcat(substring(h, 0, 8), \"-\", substring(h, 8, 4), \"-\", substring(h, 12, 4), \"-\", substring(h, 16, 4), \"-\", substring(h, 20, 12))\n| project-away h\n| order by FirstSeen asc"
+                },
+                "headers": {
+                  "Content-Type": "application/json"
+                }
+              }
+            },
+            "For_each_candidate": {
+              "type": "Foreach",
+              "runAfter": {
+                "Run_Detection_Query": [
+                  "Succeeded"
+                ]
+              },
+              "foreach": "@coalesce(body('Run_Detection_Query')?['results'], json('[]'))",
+              "actions": {
+                "Lookup_Watchlist_Item": {
+                  "type": "Http",
+                  "runAfter": {},
+                  "inputs": {
+                    "method": "GET",
+                    "uri": "https://management.azure.com@{parameters('WorkspaceResourceId')}/providers/Microsoft.SecurityInsights/watchlists/@{encodeURIComponent(parameters('WatchlistAlias'))}/watchlistItems/@{items('For_each_candidate')?['ItemId']}?api-version=2024-03-01",
+                    "authentication": {
+                      "type": "ManagedServiceIdentity",
+                      "identity": "[variables('identityId')]",
+                      "audience": "https://management.azure.com"
+                    },
+                    "retryPolicy": {
+                      "type": "none"
+                    }
+                  }
+                },
+                "Is_Unknown_User": {
+                  "type": "If",
+                  "runAfter": {
+                    "Lookup_Watchlist_Item": [
+                      "Succeeded",
+                      "Failed"
+                    ]
+                  },
+                  "expression": {
+                    "and": [
+                      {
+                        "equals": [
+                          "@outputs('Lookup_Watchlist_Item')?['statusCode']",
+                          404
+                        ]
+                      }
+                    ]
+                  },
+                  "actions": {
+                    "Append_New_User": {
+                      "type": "AppendToArrayVariable",
+                      "inputs": {
+                        "name": "NewUsers",
+                        "value": "@items('For_each_candidate')"
+                      }
+                    }
+                  },
+                  "else": {
+                    "actions": {
+                      "Record_Lookup_Error": {
+                        "type": "If",
+                        "expression": {
+                          "and": [
+                            {
+                              "not": {
+                                "equals": [
+                                  "@outputs('Lookup_Watchlist_Item')?['statusCode']",
+                                  200
+                                ]
+                              }
+                            }
+                          ]
+                        },
+                        "actions": {
+                          "Append_Lookup_Error": {
+                            "type": "AppendToArrayVariable",
+                            "inputs": {
+                              "name": "LookupErrors",
+                              "value": "@{items('For_each_candidate')?['UserId']} (HTTP @{outputs('Lookup_Watchlist_Item')?['statusCode']})"
+                            }
+                          }
+                        },
+                        "else": {
+                          "actions": {}
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "Any_New_Users": {
+              "type": "If",
+              "runAfter": {
+                "For_each_candidate": [
+                  "Succeeded"
+                ]
+              },
+              "expression": {
+                "and": [
+                  {
+                    "greater": [
+                      "@length(variables('NewUsers'))",
+                      0
+                    ]
+                  }
+                ]
+              },
+              "actions": {
+                "Select_UserIds": {
+                  "type": "Select",
+                  "runAfter": {},
+                  "inputs": {
+                    "from": "@variables('NewUsers')",
+                    "select": "@item()?['UserId']"
+                  }
+                },
+                "Run_Activity_Query": {
+                  "type": "Http",
+                  "runAfter": {
+                    "Select_UserIds": [
+                      "Succeeded"
+                    ]
+                  },
+                  "inputs": {
+                    "method": "POST",
+                    "uri": "https://graph.microsoft.com/v1.0/security/runHuntingQuery",
+                    "authentication": {
+                      "type": "ManagedServiceIdentity",
+                      "identity": "[variables('identityId')]",
+                      "audience": "https://graph.microsoft.com"
+                    },
+                    "retryPolicy": {
+                      "type": "exponential",
+                      "count": 4,
+                      "interval": "PT10S"
+                    },
+                    "body": {
+                      "Query": "let lookback = @{parameters('LookbackDays')}d;\nlet users = dynamic(@{string(body('Select_UserIds'))});\nCloudAppEvents\n| where Timestamp > ago(lookback)\n| where Application in (\"Microsoft SharePoint Online\", \"Microsoft OneDrive for Business\", \"Microsoft Office Online\")\n| extend UserId = tolower(tostring(RawEventData.UserId))\n| where UserId in (users)\n| project TimestampUtc = Timestamp, UserId, DisplayName = AccountDisplayName, Application, ActionType,\n          ObjectType, ObjectName, IPAddress, CountryCode, City\n| order by UserId asc, TimestampUtc asc\n| take 10000"
+                    },
+                    "headers": {
+                      "Content-Type": "application/json"
+                    }
+                  }
+                },
+                "Create_Activity_CSV": {
+                  "type": "Table",
+                  "runAfter": {
+                    "Run_Activity_Query": [
+                      "Succeeded"
+                    ]
+                  },
+                  "inputs": {
+                    "from": "@coalesce(body('Run_Activity_Query')?['results'], json('[]'))",
+                    "format": "CSV"
+                  }
+                },
+                "Select_User_Rows": {
+                  "type": "Select",
+                  "runAfter": {
+                    "Create_Activity_CSV": [
+                      "Succeeded"
+                    ]
+                  },
+                  "inputs": {
+                    "from": "@variables('NewUsers')",
+                    "select": {
+                      "Name": "@item()?['DisplayName']",
+                      "Account": "@item()?['UserId']",
+                      "First seen (UTC)": "@formatDateTime(item()?['FirstSeen'], 'yyyy-MM-dd HH:mm')",
+                      "Events": "@item()?['EventCount']",
+                      "Files": "@item()?['FileCount']"
+                    }
+                  }
+                },
+                "Create_User_Table": {
+                  "type": "Table",
+                  "runAfter": {
+                    "Select_User_Rows": [
+                      "Succeeded"
+                    ]
+                  },
+                  "inputs": {
+                    "from": "@body('Select_User_Rows')",
+                    "format": "HTML"
+                  }
+                },
+                "Compose_Email_Body": {
+                  "type": "Compose",
+                  "runAfter": {
+                    "Create_User_Table": [
+                      "Succeeded"
+                    ]
+                  },
+                  "inputs": "<div style=\"font-family:Segoe UI,Arial,sans-serif;font-size:14px;line-height:1.5;color:#1f2937;max-width:820px;\"><div style=\"background:#0f3d5e;color:#ffffff;padding:18px 22px;\"><div style=\"font-size:11px;letter-spacing:.1em;text-transform:uppercase;opacity:.85;\">@{parameters('SocTeamName')} &middot; Automated alert</div><div style=\"font-size:20px;font-weight:600;margin-top:4px;\">New external user file activity</div></div><div style=\"border:1px solid #d1d5db;border-top:none;padding:22px;\"><p style=\"margin:0 0 12px;\">Hi team,</p><p style=\"margin:0 0 16px;\"><b>@{length(variables('NewUsers'))} external user(s)</b> accessed SharePoint / OneDrive files for the first time in the last @{parameters('LookbackDays')} days. These accounts have not been seen by this monitoring before.</p>@{replace(replace(replace(body('Create_User_Table'), '<table>', '<table style=\"border-collapse:collapse;width:100%;font-family:Segoe UI,Arial,sans-serif;\">'), '<th>', '<th style=\"padding:8px 10px;background:#f1f5f9;border-bottom:2px solid #cbd5e1;text-align:left;font-size:12px;color:#334155;text-transform:uppercase;letter-spacing:.04em;\">'), '<td>', '<td style=\"padding:8px 10px;border-bottom:1px solid #e5e7eb;font-size:13px;color:#1f2937;\">')}<p style=\"margin:18px 0 0;\">The full activity for these users (files, actions, IP address and location) is attached as <b>external-file-activity.csv</b>.</p><p style=\"margin:12px 0 0;\">If this access is expected, no action is needed. If it is not, or you need further clarification, please reply to this email.</p><p style=\"margin:18px 0 0;\">Regards,<br/>@{parameters('SocTeamName')}</p><p style=\"margin:22px 0 0;padding-top:12px;border-top:1px solid #e5e7eb;font-size:11px;color:#6b7280;\">This is an automated email. Detection window: last @{parameters('DetectionWindowHours')} hours &middot; Generated @{formatDateTime(utcNow(), 'yyyy-MM-dd HH:mm')} UTC &middot; Workspace: @{last(split(parameters('WorkspaceResourceId'), '/'))}</p></div></div>"
+                },
+                "Send_Email_If_Configured": {
+                  "type": "If",
+                  "runAfter": {
+                    "Compose_Email_Body": [
+                      "Succeeded"
+                    ]
+                  },
+                  "expression": {
+                    "and": [
+                      {
+                        "equals": [
+                          "[not(empty(trim(parameters('NotificationRecipients'))))]",
+                          true
+                        ]
+                      }
+                    ]
+                  },
+                  "actions": {
+                    "Send_an_email_(V2)": {
+                      "type": "ApiConnection",
+                      "inputs": {
+                        "host": {
+                          "connection": {
+                            "name": "@parameters('$connections')['office365']['connectionId']"
+                          }
+                        },
+                        "method": "post",
+                        "path": "/v2/Mail",
+                        "body": "[variables('emailBody')]"
+                      }
+                    }
+                  },
+                  "else": {
+                    "actions": {}
+                  }
+                },
+                "Create_Incident_If_Configured": {
+                  "type": "If",
+                  "runAfter": {
+                    "Send_Email_If_Configured": [
+                      "Succeeded"
+                    ]
+                  },
+                  "expression": {
+                    "and": [
+                      {
+                        "not": {
+                          "equals": [
+                            "[parameters('IncidentMode')]",
+                            "None"
+                          ]
+                        }
+                      }
+                    ]
+                  },
+                  "actions": {
+                    "Create_Sentinel_Incident": {
+                      "type": "Http",
+                      "runAfter": {},
+                      "inputs": {
+                        "method": "PUT",
+                        "uri": "https://management.azure.com@{parameters('WorkspaceResourceId')}/providers/Microsoft.SecurityInsights/incidents/@{guid()}?api-version=2024-03-01",
+                        "authentication": {
+                          "type": "ManagedServiceIdentity",
+                          "identity": "[variables('identityId')]",
+                          "audience": "https://management.azure.com"
+                        },
+                        "retryPolicy": {
+                          "type": "exponential",
+                          "count": 4,
+                          "interval": "PT10S"
+                        },
+                        "body": {
+                          "properties": "[variables('incidentProperties')]"
+                        },
+                        "headers": {
+                          "Content-Type": "application/json"
+                        }
+                      }
+                    }
+                  },
+                  "else": {
+                    "actions": {}
+                  }
+                },
+                "For_each_new_user": {
+                  "type": "Foreach",
+                  "runAfter": {
+                    "Create_Incident_If_Configured": [
+                      "Succeeded",
+                      "Failed"
+                    ]
+                  },
+                  "foreach": "@variables('NewUsers')",
+                  "actions": {
+                    "Add_To_Watchlist": {
+                      "type": "Http",
+                      "runAfter": {},
+                      "inputs": {
+                        "method": "PUT",
+                        "uri": "https://management.azure.com@{parameters('WorkspaceResourceId')}/providers/Microsoft.SecurityInsights/watchlists/@{encodeURIComponent(parameters('WatchlistAlias'))}/watchlistItems/@{items('For_each_new_user')?['ItemId']}?api-version=2024-03-01",
+                        "authentication": {
+                          "type": "ManagedServiceIdentity",
+                          "identity": "[variables('identityId')]",
+                          "audience": "https://management.azure.com"
+                        },
+                        "retryPolicy": {
+                          "type": "exponential",
+                          "count": 4,
+                          "interval": "PT10S"
+                        },
+                        "body": {
+                          "properties": {
+                            "itemsKeyValue": {
+                              "UserId": "@{items('For_each_new_user')?['UserId']}",
+                              "DisplayName": "@{items('For_each_new_user')?['DisplayName']}",
+                              "FirstSeen": "@{items('For_each_new_user')?['FirstSeen']}",
+                              "LastSeen": "@{items('For_each_new_user')?['LastSeen']}",
+                              "RecentEvents": "@{items('For_each_new_user')?['EventCount']}",
+                              "RecentFiles": "@{items('For_each_new_user')?['FileCount']}",
+                              "UpdatedBy": "New external user alert"
+                            }
+                          }
+                        },
+                        "headers": {
+                          "Content-Type": "application/json"
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              "else": {
+                "actions": {}
+              }
+            },
+            "Report_Failures": {
+              "type": "If",
+              "runAfter": {
+                "Any_New_Users": [
+                  "Succeeded",
+                  "Failed",
+                  "Skipped",
+                  "TimedOut"
+                ]
+              },
+              "expression": {
+                "or": [
+                  {
+                    "greater": [
+                      "@length(variables('LookupErrors'))",
+                      0
+                    ]
+                  },
+                  {
+                    "equals": [
+                      "@actions('Any_New_Users')?['status']",
+                      "Failed"
+                    ]
+                  },
+                  {
+                    "equals": [
+                      "@actions('Any_New_Users')?['status']",
+                      "TimedOut"
+                    ]
+                  }
+                ]
+              },
+              "actions": {
+                "Terminate_Failed": {
+                  "type": "Terminate",
+                  "inputs": {
+                    "runStatus": "Failed",
+                    "runError": {
+                      "code": "NewUserAlertFailed",
+                      "message": "Notification step status: @{actions('Any_New_Users')?['status']}. Watchlist lookup errors: @{join(variables('LookupErrors'), ', ')}"
+                    }
+                  }
+                }
+              },
+              "else": {
+                "actions": {}
+              }
+            }
+          },
+          "outputs": {}
+        },
+        "parameters": {
+          "WorkspaceResourceId": {
+            "value": "[variables('workspaceResourceId')]"
+          },
+          "WatchlistAlias": {
+            "value": "[parameters('WatchlistAlias')]"
+          },
+          "LookbackDays": {
+            "value": "[parameters('LookbackDays')]"
+          },
+          "DetectionWindowHours": {
+            "value": "[parameters('DetectionWindowHours')]"
+          },
+          "SocTeamName": {
+            "value": "[parameters('SocTeamName')]"
+          },
+          "$connections": {
+            "value": {
+              "office365": {
+                "id": "[variables('office365ApiId')]",
+                "connectionId": "[resourceId('Microsoft.Web/connections', variables('office365ConnectionName'))]",
+                "connectionName": "[variables('office365ConnectionName')]"
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "outputs": {
+    "managedIdentityPrincipalId": {
+      "type": "string",
+      "value": "[reference(variables('identityId'), '2023-01-31').principalId]"
+    },
+    "managedIdentityResourceId": {
+      "type": "string",
+      "value": "[variables('identityId')]"
+    },
+    "watchlistSyncPlaybook": {
+      "type": "string",
+      "value": "[variables('syncPlaybookName')]"
+    },
+    "newUserAlertPlaybook": {
+      "type": "string",
+      "value": "[variables('alertPlaybookName')]"
+    },
+    "office365ConnectionToAuthorize": {
+      "type": "string",
+      "value": "[variables('office365ConnectionName')]"
+    }
+  }
+}
