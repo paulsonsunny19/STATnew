@@ -55,4 +55,4 @@ EmailAttachmentInfo
 }
 
 Write-StatLog -Message "File insights lookup completed" -Data @{ hashCount = $hashEntities.Count }
-Send-Response ([HttpStatusCode]::OK) @{ results = $results }
+Send-Response ([HttpStatusCode]::OK) @{ results = @($results) }

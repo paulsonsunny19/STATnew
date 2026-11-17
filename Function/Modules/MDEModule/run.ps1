@@ -72,4 +72,4 @@ $results = foreach ($deviceName in $deviceNames) {
 }
 
 Write-StatLog -Message "MDE risk lookup completed" -Data @{ deviceCount = $deviceNames.Count }
-Send-Response ([HttpStatusCode]::OK) @{ results = $results }
+Send-Response ([HttpStatusCode]::OK) @{ results = @($results) }

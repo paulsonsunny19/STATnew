@@ -49,4 +49,4 @@ BehaviorAnalytics
 }
 
 Write-StatLog -Message "UEBA lookup completed" -Data @{ accountCount = $accountEntities.Count }
-Send-Response ([HttpStatusCode]::OK) @{ results = $results }
+Send-Response ([HttpStatusCode]::OK) @{ results = @($results) }

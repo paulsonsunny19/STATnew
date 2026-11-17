@@ -1,7 +1,9 @@
 # Sample triage Logic App
 
 `azuredeploy.json` deploys a Consumption Logic App demonstrating the intended STAT-Secure
-usage pattern, triggered on Sentinel incident creation:
+usage pattern, triggered on Sentinel incident creation. For a playbook that analysts run on a single entity
+(account, host, IP, file hash or URL) from inside an incident, see
+[`EntityTrigger/`](EntityTrigger/README.md).
 
 ```
 Sentinel incident created

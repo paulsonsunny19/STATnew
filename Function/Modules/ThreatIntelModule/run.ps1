@@ -55,4 +55,4 @@ ThreatIntelligenceIndicator
 }
 
 Write-StatLog -Message "Threat intelligence lookup completed" -Data @{ entityCount = $entities.Count }
-Send-Response ([HttpStatusCode]::OK) @{ results = $results }
+Send-Response ([HttpStatusCode]::OK) @{ results = @($results) }

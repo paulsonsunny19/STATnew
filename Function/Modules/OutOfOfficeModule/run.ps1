@@ -56,4 +56,4 @@ $results = foreach ($entity in $accountEntities) {
 }
 
 Write-StatLog -Message "Out of office lookup completed" -Data @{ accountCount = $accountEntities.Count }
-Send-Response ([HttpStatusCode]::OK) @{ results = $results }
+Send-Response ([HttpStatusCode]::OK) @{ results = @($results) }

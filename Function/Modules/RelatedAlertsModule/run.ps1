@@ -60,4 +60,4 @@ SecurityAlert
 }
 
 Write-StatLog -Message "Related alerts lookup completed" -Data @{ entityCount = $entities.Count; lookbackDays = $lookbackDays }
-Send-Response ([HttpStatusCode]::OK) @{ lookbackDays = $lookbackDays; results = $results }
+Send-Response ([HttpStatusCode]::OK) @{ lookbackDays = $lookbackDays; results = @($results) }

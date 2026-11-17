@@ -81,4 +81,4 @@ CommonSecurityLog
 
 Write-StatLog -Message "IP reputation lookup completed" -Data @{ ipCount = $ipEntities.Count }
 
-Send-Response ([HttpStatusCode]::OK) @{ results = $results }
+Send-Response ([HttpStatusCode]::OK) @{ results = @($results) }

@@ -67,4 +67,4 @@ _GetWatchlist('$alias')
 }
 
 Write-StatLog -Message "Watchlist lookup completed" -Data @{ alias = $alias; entityCount = $entities.Count }
-Send-Response ([HttpStatusCode]::OK) @{ watchlist = $alias; results = $results }
+Send-Response ([HttpStatusCode]::OK) @{ watchlist = $alias; results = @($results) }

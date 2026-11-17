@@ -1,0 +1,1261 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "title": "STAT-Secure entity triage playbook",
+    "description": "Microsoft Sentinel entity-triggered playbook that runs the STAT-Secure triage modules relevant to one entity type, scores the result, comments on the incident, and optionally raises severity on a High band.",
+    "entities": [
+      "account",
+      "host",
+      "ip",
+      "filehash",
+      "url"
+    ],
+    "tags": [
+      "Triage",
+      "Enrichment",
+      "STAT-Secure"
+    ]
+  },
+  "parameters": {
+    "PlaybookName": {
+      "type": "string",
+      "defaultValue": "[concat('STAT-Secure-Entity-', parameters('EntityType'))]",
+      "metadata": {
+        "description": "Name of the Logic App. One playbook is deployed per entity type."
+      }
+    },
+    "EntityType": {
+      "type": "string",
+      "defaultValue": "Account",
+      "allowedValues": [
+        "Account",
+        "Host",
+        "IP",
+        "FileHash",
+        "URL"
+      ],
+      "metadata": {
+        "description": "Sentinel entity type this playbook is triggered on. Deploy the template again for each additional type."
+      }
+    },
+    "STATConnectionName": {
+      "type": "string",
+      "defaultValue": "statsecure-connector",
+      "metadata": {
+        "description": "Name of the EXISTING Logic Apps API connection (and custom connector) for the STAT-Secure Function App, in this resource group."
+      }
+    },
+    "RelatedAlertsLookbackDays": {
+      "type": "int",
+      "defaultValue": 7,
+      "minValue": 1,
+      "maxValue": 30,
+      "metadata": {
+        "description": "Lookback window for the Related Alerts module (server-clamped to 30)."
+      }
+    },
+    "RaiseSeverityOnHighRisk": {
+      "type": "bool",
+      "defaultValue": true,
+      "metadata": {
+        "description": "If true, a High risk band sets incident severity to High and adds the tag STAT-Secure-HighRisk."
+      }
+    }
+  },
+  "variables": {
+    "sentinelEntityType": "[parameters('EntityType')]",
+    "statEntityType": "[toLower(parameters('EntityType'))]",
+    "valueExpressions": {
+      "account": "@{triggerBody()?['Entity']?['properties']?['Name']}@@{triggerBody()?['Entity']?['properties']?['UPNSuffix']}",
+      "host": "@{triggerBody()?['Entity']?['properties']?['HostName']}",
+      "ip": "@{triggerBody()?['Entity']?['properties']?['Address']}",
+      "filehash": "@{triggerBody()?['Entity']?['properties']?['Value']}",
+      "url": "@{triggerBody()?['Entity']?['properties']?['Url']}"
+    },
+    "entityValueExpression": "[variables('valueExpressions')[variables('statEntityType')]]",
+    "sentinelConnectionName": "[concat('azuresentinel-', parameters('PlaybookName'))]"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Web/connections",
+      "apiVersion": "2016-06-01",
+      "name": "[variables('sentinelConnectionName')]",
+      "location": "[resourceGroup().location]",
+      "kind": "V1",
+      "properties": {
+        "displayName": "[variables('sentinelConnectionName')]",
+        "customParameterValues": {},
+        "parameterValueType": "Alternative",
+        "api": {
+          "id": "[concat('/subscriptions/', subscription().subscriptionId, '/providers/Microsoft.Web/locations/', resourceGroup().location, '/managedApis/azuresentinel')]"
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Logic/workflows",
+      "apiVersion": "2019-05-01",
+      "name": "[parameters('PlaybookName')]",
+      "location": "[resourceGroup().location]",
+      "tags": {
+        "hidden-SentinelTemplateName": "STAT-Secure-Entity-Triage",
+        "hidden-SentinelTemplateVersion": "1.0"
+      },
+      "identity": {
+        "type": "SystemAssigned"
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Web/connections', variables('sentinelConnectionName'))]"
+      ],
+      "properties": {
+        "state": "Enabled",
+        "definition": {
+          "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+          "contentVersion": "1.0.0.0",
+          "parameters": {
+            "$connections": {
+              "defaultValue": {},
+              "type": "Object"
+            },
+            "EntityType": {
+              "defaultValue": "account",
+              "type": "String"
+            },
+            "RelatedAlertsLookbackDays": {
+              "defaultValue": 7,
+              "type": "Int"
+            },
+            "RaiseSeverityOnHighRisk": {
+              "defaultValue": true,
+              "type": "Bool"
+            }
+          },
+          "triggers": {
+            "Microsoft_Sentinel_entity": {
+              "type": "ApiConnectionWebhook",
+              "inputs": {
+                "host": {
+                  "connection": {
+                    "name": "@parameters('$connections')['azuresentinel']['connectionId']"
+                  }
+                },
+                "body": {
+                  "callback_url": "@{listCallbackUrl()}"
+                },
+                "path": "[concat('/entity/@{encodeURIComponent(''', variables('sentinelEntityType'), ''')}')]"
+              }
+            }
+          },
+          "actions": {
+            "Init_AadRiskLevelHigh": {
+              "type": "InitializeVariable",
+              "inputs": {
+                "variables": [
+                  {
+                    "name": "AadRiskLevelHigh",
+                    "type": "boolean",
+                    "value": false
+                  }
+                ]
+              },
+              "runAfter": {}
+            },
+            "Init_AadRiskLevelMedium": {
+              "type": "InitializeVariable",
+              "inputs": {
+                "variables": [
+                  {
+                    "name": "AadRiskLevelMedium",
+                    "type": "boolean",
+                    "value": false
+                  }
+                ]
+              },
+              "runAfter": {
+                "Init_AadRiskLevelHigh": [
+                  "Succeeded"
+                ]
+              }
+            },
+            "Init_ThreatIntelMatch": {
+              "type": "InitializeVariable",
+              "inputs": {
+                "variables": [
+                  {
+                    "name": "ThreatIntelMatch",
+                    "type": "boolean",
+                    "value": false
+                  }
+                ]
+              },
+              "runAfter": {
+                "Init_AadRiskLevelMedium": [
+                  "Succeeded"
+                ]
+              }
+            },
+            "Init_UebaHighPriority": {
+              "type": "InitializeVariable",
+              "inputs": {
+                "variables": [
+                  {
+                    "name": "UebaHighPriority",
+                    "type": "boolean",
+                    "value": false
+                  }
+                ]
+              },
+              "runAfter": {
+                "Init_ThreatIntelMatch": [
+                  "Succeeded"
+                ]
+              }
+            },
+            "Init_MdeHighExposure": {
+              "type": "InitializeVariable",
+              "inputs": {
+                "variables": [
+                  {
+                    "name": "MdeHighExposure",
+                    "type": "boolean",
+                    "value": false
+                  }
+                ]
+              },
+              "runAfter": {
+                "Init_UebaHighPriority": [
+                  "Succeeded"
+                ]
+              }
+            },
+            "Init_RelatedAlertsPresent": {
+              "type": "InitializeVariable",
+              "inputs": {
+                "variables": [
+                  {
+                    "name": "RelatedAlertsPresent",
+                    "type": "boolean",
+                    "value": false
+                  }
+                ]
+              },
+              "runAfter": {
+                "Init_MdeHighExposure": [
+                  "Succeeded"
+                ]
+              }
+            },
+            "Init_Findings": {
+              "type": "InitializeVariable",
+              "inputs": {
+                "variables": [
+                  {
+                    "name": "Findings",
+                    "type": "array",
+                    "value": []
+                  }
+                ]
+              },
+              "runAfter": {
+                "Init_RelatedAlertsPresent": [
+                  "Succeeded"
+                ]
+              }
+            },
+            "Require_Incident_Context": {
+              "type": "If",
+              "expression": {
+                "and": [
+                  {
+                    "equals": [
+                      "@empty(triggerBody()?['IncidentArmID'])",
+                      true
+                    ]
+                  }
+                ]
+              },
+              "actions": {
+                "Stop_No_Incident": {
+                  "type": "Terminate",
+                  "inputs": {
+                    "runStatus": "Cancelled"
+                  },
+                  "runAfter": {}
+                }
+              },
+              "else": {
+                "actions": {}
+              },
+              "runAfter": {
+                "Init_Findings": [
+                  "Succeeded"
+                ]
+              },
+              "description": "STAT-Secure modules are scoped to an incident. Run this playbook from an entity inside an incident (incident > Entities > Run playbook), not from the entity page."
+            },
+            "Compose_Entity": {
+              "type": "Compose",
+              "inputs": {
+                "Type": "@parameters('EntityType')",
+                "Value": "[variables('entityValueExpression')]"
+              },
+              "runAfter": {
+                "Require_Incident_Context": [
+                  "Succeeded"
+                ]
+              }
+            },
+            "Call_Base_Module": {
+              "type": "ApiConnection",
+              "inputs": {
+                "host": {
+                  "connection": {
+                    "name": "@parameters('$connections')['statsecure']['connectionId']"
+                  }
+                },
+                "method": "post",
+                "path": "/BaseModule",
+                "body": {
+                  "IncidentARMId": "@triggerBody()?['IncidentArmID']",
+                  "Entities": [
+                    "@outputs('Compose_Entity')"
+                  ]
+                }
+              },
+              "runAfter": {
+                "Compose_Entity": [
+                  "Succeeded"
+                ]
+              }
+            },
+            "Switch_Entity_Type": {
+              "type": "Switch",
+              "expression": "@parameters('EntityType')",
+              "cases": {
+                "Case_Account": {
+                  "case": "account",
+                  "actions": {
+                    "Call_AAD_Risk_Module_Account": {
+                      "type": "ApiConnection",
+                      "inputs": {
+                        "host": {
+                          "connection": {
+                            "name": "@parameters('$connections')['statsecure']['connectionId']"
+                          }
+                        },
+                        "method": "post",
+                        "path": "/Modules/AADRisk",
+                        "body": "@body('Call_Base_Module')"
+                      },
+                      "runAfter": {}
+                    },
+                    "Set_AadRiskLevelHigh_Account": {
+                      "type": "SetVariable",
+                      "inputs": {
+                        "name": "AadRiskLevelHigh",
+                        "value": "@equals(toLower(string(body('Call_AAD_Risk_Module_Account')?['results']?[0]?['RiskLevel'])), 'high')"
+                      },
+                      "runAfter": {
+                        "Call_AAD_Risk_Module_Account": [
+                          "Succeeded"
+                        ]
+                      }
+                    },
+                    "Set_AadRiskLevelMedium_Account": {
+                      "type": "SetVariable",
+                      "inputs": {
+                        "name": "AadRiskLevelMedium",
+                        "value": "@equals(toLower(string(body('Call_AAD_Risk_Module_Account')?['results']?[0]?['RiskLevel'])), 'medium')"
+                      },
+                      "runAfter": {
+                        "Call_AAD_Risk_Module_Account": [
+                          "Succeeded"
+                        ]
+                      }
+                    },
+                    "Finding_AAD_Risk_Account": {
+                      "type": "AppendToArrayVariable",
+                      "inputs": {
+                        "name": "Findings",
+                        "value": "<li>Entra ID risk level: @{body('Call_AAD_Risk_Module_Account')?['results']?[0]?['RiskLevel']}</li>"
+                      },
+                      "runAfter": {
+                        "Call_AAD_Risk_Module_Account": [
+                          "Succeeded"
+                        ]
+                      }
+                    },
+                    "Note_AAD_Risk_Failed_Account": {
+                      "type": "AppendToArrayVariable",
+                      "inputs": {
+                        "name": "Findings",
+                        "value": "<li>Entra ID Risk module did not complete; its factor was scored as false.</li>"
+                      },
+                      "runAfter": {
+                        "Call_AAD_Risk_Module_Account": [
+                          "Failed",
+                          "TimedOut"
+                        ]
+                      }
+                    },
+                    "Call_UEBA_Module_Account": {
+                      "type": "ApiConnection",
+                      "inputs": {
+                        "host": {
+                          "connection": {
+                            "name": "@parameters('$connections')['statsecure']['connectionId']"
+                          }
+                        },
+                        "method": "post",
+                        "path": "/Modules/UEBA",
+                        "body": "@body('Call_Base_Module')"
+                      },
+                      "runAfter": {}
+                    },
+                    "Set_UebaHighPriority_Account": {
+                      "type": "SetVariable",
+                      "inputs": {
+                        "name": "UebaHighPriority",
+                        "value": "@greater(int(coalesce(body('Call_UEBA_Module_Account')?['results']?[0]?['MaxPriority'], 0)), 5)"
+                      },
+                      "runAfter": {
+                        "Call_UEBA_Module_Account": [
+                          "Succeeded"
+                        ]
+                      }
+                    },
+                    "Finding_UEBA_Account": {
+                      "type": "AppendToArrayVariable",
+                      "inputs": {
+                        "name": "Findings",
+                        "value": "<li>UEBA max investigation priority (14d): @{coalesce(body('Call_UEBA_Module_Account')?['results']?[0]?['MaxPriority'], 0)}</li>"
+                      },
+                      "runAfter": {
+                        "Call_UEBA_Module_Account": [
+                          "Succeeded"
+                        ]
+                      }
+                    },
+                    "Note_UEBA_Failed_Account": {
+                      "type": "AppendToArrayVariable",
+                      "inputs": {
+                        "name": "Findings",
+                        "value": "<li>UEBA module did not complete; its factor was scored as false.</li>"
+                      },
+                      "runAfter": {
+                        "Call_UEBA_Module_Account": [
+                          "Failed",
+                          "TimedOut"
+                        ]
+                      }
+                    },
+                    "Call_MDE_Module_Account": {
+                      "type": "ApiConnection",
+                      "inputs": {
+                        "host": {
+                          "connection": {
+                            "name": "@parameters('$connections')['statsecure']['connectionId']"
+                          }
+                        },
+                        "method": "post",
+                        "path": "/Modules/MDE",
+                        "body": "@body('Call_Base_Module')"
+                      },
+                      "runAfter": {}
+                    },
+                    "Filter_MDE_High_Exposure_Account": {
+                      "type": "Query",
+                      "inputs": {
+                        "from": "@coalesce(body('Call_MDE_Module_Account')?['results'], json('[]'))",
+                        "where": "@equals(toLower(string(item()?['ExposureLevel'])), 'high')"
+                      },
+                      "runAfter": {
+                        "Call_MDE_Module_Account": [
+                          "Succeeded"
+                        ]
+                      }
+                    },
+                    "Set_MdeHighExposure_Account": {
+                      "type": "SetVariable",
+                      "inputs": {
+                        "name": "MdeHighExposure",
+                        "value": "@greater(length(body('Filter_MDE_High_Exposure_Account')), 0)"
+                      },
+                      "runAfter": {
+                        "Filter_MDE_High_Exposure_Account": [
+                          "Succeeded"
+                        ]
+                      }
+                    },
+                    "Finding_MDE_Account": {
+                      "type": "AppendToArrayVariable",
+                      "inputs": {
+                        "name": "Findings",
+                        "value": "<li>Defender for Endpoint: @{length(coalesce(body('Call_MDE_Module_Account')?['results'], json('[]')))} device(s) checked, @{length(body('Filter_MDE_High_Exposure_Account'))} with high exposure</li>"
+                      },
+                      "runAfter": {
+                        "Filter_MDE_High_Exposure_Account": [
+                          "Succeeded"
+                        ]
+                      }
+                    },
+                    "Note_MDE_Failed_Account": {
+                      "type": "AppendToArrayVariable",
+                      "inputs": {
+                        "name": "Findings",
+                        "value": "<li>Defender for Endpoint module did not complete; its factor was scored as false.</li>"
+                      },
+                      "runAfter": {
+                        "Call_MDE_Module_Account": [
+                          "Failed",
+                          "TimedOut"
+                        ]
+                      }
+                    },
+                    "Call_Related_Alerts_Module_Account": {
+                      "type": "ApiConnection",
+                      "inputs": {
+                        "host": {
+                          "connection": {
+                            "name": "@parameters('$connections')['statsecure']['connectionId']"
+                          }
+                        },
+                        "method": "post",
+                        "path": "/Modules/RelatedAlerts",
+                        "body": {
+                          "IncidentARMId": "@body('Call_Base_Module')?['IncidentARMId']",
+                          "Entities": "@body('Call_Base_Module')?['Entities']",
+                          "LookbackDays": "@parameters('RelatedAlertsLookbackDays')"
+                        }
+                      },
+                      "runAfter": {}
+                    },
+                    "Set_RelatedAlertsPresent_Account": {
+                      "type": "SetVariable",
+                      "inputs": {
+                        "name": "RelatedAlertsPresent",
+                        "value": "@not(empty(body('Call_Related_Alerts_Module_Account')?['results']?[0]?['RelatedAlerts']))"
+                      },
+                      "runAfter": {
+                        "Call_Related_Alerts_Module_Account": [
+                          "Succeeded"
+                        ]
+                      }
+                    },
+                    "Finding_Related_Alerts_Account": {
+                      "type": "AppendToArrayVariable",
+                      "inputs": {
+                        "name": "Findings",
+                        "value": "<li>Other alerts referencing this entity (last @{body('Call_Related_Alerts_Module_Account')?['lookbackDays']} days): @{if(not(empty(body('Call_Related_Alerts_Module_Account')?['results']?[0]?['RelatedAlerts'])), 'yes', 'none')}</li>"
+                      },
+                      "runAfter": {
+                        "Call_Related_Alerts_Module_Account": [
+                          "Succeeded"
+                        ]
+                      }
+                    },
+                    "Note_Related_Alerts_Failed_Account": {
+                      "type": "AppendToArrayVariable",
+                      "inputs": {
+                        "name": "Findings",
+                        "value": "<li>Related Alerts module did not complete; its factor was scored as false.</li>"
+                      },
+                      "runAfter": {
+                        "Call_Related_Alerts_Module_Account": [
+                          "Failed",
+                          "TimedOut"
+                        ]
+                      }
+                    }
+                  }
+                },
+                "Case_IP": {
+                  "case": "ip",
+                  "actions": {
+                    "Call_IP_Reputation_Module_IP": {
+                      "type": "ApiConnection",
+                      "inputs": {
+                        "host": {
+                          "connection": {
+                            "name": "@parameters('$connections')['statsecure']['connectionId']"
+                          }
+                        },
+                        "method": "post",
+                        "path": "/Modules/IPReputation",
+                        "body": "@body('Call_Base_Module')"
+                      },
+                      "runAfter": {}
+                    },
+                    "Finding_IP_Reputation_IP": {
+                      "type": "AppendToArrayVariable",
+                      "inputs": {
+                        "name": "Findings",
+                        "value": "<li>IP reputation: @{coalesce(body('Call_IP_Reputation_Module_IP')?['results']?[0]?['ThreatIntel']?['Reputation'], 'unknown')} (category: @{coalesce(body('Call_IP_Reputation_Module_IP')?['results']?[0]?['ThreatIntel']?['Category'], 'unknown')}); internal CommonSecurityLog activity (30d): @{if(empty(body('Call_IP_Reputation_Module_IP')?['results']?[0]?['InternalActivity']), 'none', 'present')}</li>"
+                      },
+                      "runAfter": {
+                        "Call_IP_Reputation_Module_IP": [
+                          "Succeeded"
+                        ]
+                      }
+                    },
+                    "Note_IP_Reputation_Failed_IP": {
+                      "type": "AppendToArrayVariable",
+                      "inputs": {
+                        "name": "Findings",
+                        "value": "<li>IP Reputation module did not complete; its factor was scored as false.</li>"
+                      },
+                      "runAfter": {
+                        "Call_IP_Reputation_Module_IP": [
+                          "Failed",
+                          "TimedOut"
+                        ]
+                      }
+                    },
+                    "Call_Threat_Intel_Module_IP": {
+                      "type": "ApiConnection",
+                      "inputs": {
+                        "host": {
+                          "connection": {
+                            "name": "@parameters('$connections')['statsecure']['connectionId']"
+                          }
+                        },
+                        "method": "post",
+                        "path": "/Modules/ThreatIntel",
+                        "body": "@body('Call_Base_Module')"
+                      },
+                      "runAfter": {}
+                    },
+                    "Set_ThreatIntelMatch_IP": {
+                      "type": "SetVariable",
+                      "inputs": {
+                        "name": "ThreatIntelMatch",
+                        "value": "@equals(body('Call_Threat_Intel_Module_IP')?['results']?[0]?['IsKnownIndicator'], true)"
+                      },
+                      "runAfter": {
+                        "Call_Threat_Intel_Module_IP": [
+                          "Succeeded"
+                        ]
+                      }
+                    },
+                    "Finding_Threat_Intel_IP": {
+                      "type": "AppendToArrayVariable",
+                      "inputs": {
+                        "name": "Findings",
+                        "value": "<li>Active threat intelligence indicator match (90d): @{if(equals(body('Call_Threat_Intel_Module_IP')?['results']?[0]?['IsKnownIndicator'], true), 'yes', 'no')}</li>"
+                      },
+                      "runAfter": {
+                        "Call_Threat_Intel_Module_IP": [
+                          "Succeeded"
+                        ]
+                      }
+                    },
+                    "Note_Threat_Intel_Failed_IP": {
+                      "type": "AppendToArrayVariable",
+                      "inputs": {
+                        "name": "Findings",
+                        "value": "<li>Threat Intelligence module did not complete; its factor was scored as false.</li>"
+                      },
+                      "runAfter": {
+                        "Call_Threat_Intel_Module_IP": [
+                          "Failed",
+                          "TimedOut"
+                        ]
+                      }
+                    },
+                    "Call_MDE_Module_IP": {
+                      "type": "ApiConnection",
+                      "inputs": {
+                        "host": {
+                          "connection": {
+                            "name": "@parameters('$connections')['statsecure']['connectionId']"
+                          }
+                        },
+                        "method": "post",
+                        "path": "/Modules/MDE",
+                        "body": "@body('Call_Base_Module')"
+                      },
+                      "runAfter": {}
+                    },
+                    "Filter_MDE_High_Exposure_IP": {
+                      "type": "Query",
+                      "inputs": {
+                        "from": "@coalesce(body('Call_MDE_Module_IP')?['results'], json('[]'))",
+                        "where": "@equals(toLower(string(item()?['ExposureLevel'])), 'high')"
+                      },
+                      "runAfter": {
+                        "Call_MDE_Module_IP": [
+                          "Succeeded"
+                        ]
+                      }
+                    },
+                    "Set_MdeHighExposure_IP": {
+                      "type": "SetVariable",
+                      "inputs": {
+                        "name": "MdeHighExposure",
+                        "value": "@greater(length(body('Filter_MDE_High_Exposure_IP')), 0)"
+                      },
+                      "runAfter": {
+                        "Filter_MDE_High_Exposure_IP": [
+                          "Succeeded"
+                        ]
+                      }
+                    },
+                    "Finding_MDE_IP": {
+                      "type": "AppendToArrayVariable",
+                      "inputs": {
+                        "name": "Findings",
+                        "value": "<li>Defender for Endpoint: @{length(coalesce(body('Call_MDE_Module_IP')?['results'], json('[]')))} device(s) checked, @{length(body('Filter_MDE_High_Exposure_IP'))} with high exposure</li>"
+                      },
+                      "runAfter": {
+                        "Filter_MDE_High_Exposure_IP": [
+                          "Succeeded"
+                        ]
+                      }
+                    },
+                    "Note_MDE_Failed_IP": {
+                      "type": "AppendToArrayVariable",
+                      "inputs": {
+                        "name": "Findings",
+                        "value": "<li>Defender for Endpoint module did not complete; its factor was scored as false.</li>"
+                      },
+                      "runAfter": {
+                        "Call_MDE_Module_IP": [
+                          "Failed",
+                          "TimedOut"
+                        ]
+                      }
+                    },
+                    "Call_Related_Alerts_Module_IP": {
+                      "type": "ApiConnection",
+                      "inputs": {
+                        "host": {
+                          "connection": {
+                            "name": "@parameters('$connections')['statsecure']['connectionId']"
+                          }
+                        },
+                        "method": "post",
+                        "path": "/Modules/RelatedAlerts",
+                        "body": {
+                          "IncidentARMId": "@body('Call_Base_Module')?['IncidentARMId']",
+                          "Entities": "@body('Call_Base_Module')?['Entities']",
+                          "LookbackDays": "@parameters('RelatedAlertsLookbackDays')"
+                        }
+                      },
+                      "runAfter": {}
+                    },
+                    "Set_RelatedAlertsPresent_IP": {
+                      "type": "SetVariable",
+                      "inputs": {
+                        "name": "RelatedAlertsPresent",
+                        "value": "@not(empty(body('Call_Related_Alerts_Module_IP')?['results']?[0]?['RelatedAlerts']))"
+                      },
+                      "runAfter": {
+                        "Call_Related_Alerts_Module_IP": [
+                          "Succeeded"
+                        ]
+                      }
+                    },
+                    "Finding_Related_Alerts_IP": {
+                      "type": "AppendToArrayVariable",
+                      "inputs": {
+                        "name": "Findings",
+                        "value": "<li>Other alerts referencing this entity (last @{body('Call_Related_Alerts_Module_IP')?['lookbackDays']} days): @{if(not(empty(body('Call_Related_Alerts_Module_IP')?['results']?[0]?['RelatedAlerts'])), 'yes', 'none')}</li>"
+                      },
+                      "runAfter": {
+                        "Call_Related_Alerts_Module_IP": [
+                          "Succeeded"
+                        ]
+                      }
+                    },
+                    "Note_Related_Alerts_Failed_IP": {
+                      "type": "AppendToArrayVariable",
+                      "inputs": {
+                        "name": "Findings",
+                        "value": "<li>Related Alerts module did not complete; its factor was scored as false.</li>"
+                      },
+                      "runAfter": {
+                        "Call_Related_Alerts_Module_IP": [
+                          "Failed",
+                          "TimedOut"
+                        ]
+                      }
+                    }
+                  }
+                },
+                "Case_Host": {
+                  "case": "host",
+                  "actions": {
+                    "Call_Threat_Intel_Module_Host": {
+                      "type": "ApiConnection",
+                      "inputs": {
+                        "host": {
+                          "connection": {
+                            "name": "@parameters('$connections')['statsecure']['connectionId']"
+                          }
+                        },
+                        "method": "post",
+                        "path": "/Modules/ThreatIntel",
+                        "body": "@body('Call_Base_Module')"
+                      },
+                      "runAfter": {}
+                    },
+                    "Set_ThreatIntelMatch_Host": {
+                      "type": "SetVariable",
+                      "inputs": {
+                        "name": "ThreatIntelMatch",
+                        "value": "@equals(body('Call_Threat_Intel_Module_Host')?['results']?[0]?['IsKnownIndicator'], true)"
+                      },
+                      "runAfter": {
+                        "Call_Threat_Intel_Module_Host": [
+                          "Succeeded"
+                        ]
+                      }
+                    },
+                    "Finding_Threat_Intel_Host": {
+                      "type": "AppendToArrayVariable",
+                      "inputs": {
+                        "name": "Findings",
+                        "value": "<li>Active threat intelligence indicator match (90d): @{if(equals(body('Call_Threat_Intel_Module_Host')?['results']?[0]?['IsKnownIndicator'], true), 'yes', 'no')}</li>"
+                      },
+                      "runAfter": {
+                        "Call_Threat_Intel_Module_Host": [
+                          "Succeeded"
+                        ]
+                      }
+                    },
+                    "Note_Threat_Intel_Failed_Host": {
+                      "type": "AppendToArrayVariable",
+                      "inputs": {
+                        "name": "Findings",
+                        "value": "<li>Threat Intelligence module did not complete; its factor was scored as false.</li>"
+                      },
+                      "runAfter": {
+                        "Call_Threat_Intel_Module_Host": [
+                          "Failed",
+                          "TimedOut"
+                        ]
+                      }
+                    },
+                    "Call_Related_Alerts_Module_Host": {
+                      "type": "ApiConnection",
+                      "inputs": {
+                        "host": {
+                          "connection": {
+                            "name": "@parameters('$connections')['statsecure']['connectionId']"
+                          }
+                        },
+                        "method": "post",
+                        "path": "/Modules/RelatedAlerts",
+                        "body": {
+                          "IncidentARMId": "@body('Call_Base_Module')?['IncidentARMId']",
+                          "Entities": "@body('Call_Base_Module')?['Entities']",
+                          "LookbackDays": "@parameters('RelatedAlertsLookbackDays')"
+                        }
+                      },
+                      "runAfter": {}
+                    },
+                    "Set_RelatedAlertsPresent_Host": {
+                      "type": "SetVariable",
+                      "inputs": {
+                        "name": "RelatedAlertsPresent",
+                        "value": "@not(empty(body('Call_Related_Alerts_Module_Host')?['results']?[0]?['RelatedAlerts']))"
+                      },
+                      "runAfter": {
+                        "Call_Related_Alerts_Module_Host": [
+                          "Succeeded"
+                        ]
+                      }
+                    },
+                    "Finding_Related_Alerts_Host": {
+                      "type": "AppendToArrayVariable",
+                      "inputs": {
+                        "name": "Findings",
+                        "value": "<li>Other alerts referencing this entity (last @{body('Call_Related_Alerts_Module_Host')?['lookbackDays']} days): @{if(not(empty(body('Call_Related_Alerts_Module_Host')?['results']?[0]?['RelatedAlerts'])), 'yes', 'none')}</li>"
+                      },
+                      "runAfter": {
+                        "Call_Related_Alerts_Module_Host": [
+                          "Succeeded"
+                        ]
+                      }
+                    },
+                    "Note_Related_Alerts_Failed_Host": {
+                      "type": "AppendToArrayVariable",
+                      "inputs": {
+                        "name": "Findings",
+                        "value": "<li>Related Alerts module did not complete; its factor was scored as false.</li>"
+                      },
+                      "runAfter": {
+                        "Call_Related_Alerts_Module_Host": [
+                          "Failed",
+                          "TimedOut"
+                        ]
+                      }
+                    }
+                  }
+                },
+                "Case_FileHash": {
+                  "case": "filehash",
+                  "actions": {
+                    "Call_File_Insights_Module_FileHash": {
+                      "type": "ApiConnection",
+                      "inputs": {
+                        "host": {
+                          "connection": {
+                            "name": "@parameters('$connections')['statsecure']['connectionId']"
+                          }
+                        },
+                        "method": "post",
+                        "path": "/Modules/FileInsights",
+                        "body": "@body('Call_Base_Module')"
+                      },
+                      "runAfter": {}
+                    },
+                    "Finding_File_Insights_FileHash": {
+                      "type": "AppendToArrayVariable",
+                      "inputs": {
+                        "name": "Findings",
+                        "value": "<li>Hash seen as an email attachment: @{if(equals(body('Call_File_Insights_Module_FileHash')?['results']?[0]?['FoundAsAttachment'], true), 'yes', 'no')}</li>"
+                      },
+                      "runAfter": {
+                        "Call_File_Insights_Module_FileHash": [
+                          "Succeeded"
+                        ]
+                      }
+                    },
+                    "Note_File_Insights_Failed_FileHash": {
+                      "type": "AppendToArrayVariable",
+                      "inputs": {
+                        "name": "Findings",
+                        "value": "<li>File Insights module did not complete; its factor was scored as false.</li>"
+                      },
+                      "runAfter": {
+                        "Call_File_Insights_Module_FileHash": [
+                          "Failed",
+                          "TimedOut"
+                        ]
+                      }
+                    },
+                    "Call_Threat_Intel_Module_FileHash": {
+                      "type": "ApiConnection",
+                      "inputs": {
+                        "host": {
+                          "connection": {
+                            "name": "@parameters('$connections')['statsecure']['connectionId']"
+                          }
+                        },
+                        "method": "post",
+                        "path": "/Modules/ThreatIntel",
+                        "body": "@body('Call_Base_Module')"
+                      },
+                      "runAfter": {}
+                    },
+                    "Set_ThreatIntelMatch_FileHash": {
+                      "type": "SetVariable",
+                      "inputs": {
+                        "name": "ThreatIntelMatch",
+                        "value": "@equals(body('Call_Threat_Intel_Module_FileHash')?['results']?[0]?['IsKnownIndicator'], true)"
+                      },
+                      "runAfter": {
+                        "Call_Threat_Intel_Module_FileHash": [
+                          "Succeeded"
+                        ]
+                      }
+                    },
+                    "Finding_Threat_Intel_FileHash": {
+                      "type": "AppendToArrayVariable",
+                      "inputs": {
+                        "name": "Findings",
+                        "value": "<li>Active threat intelligence indicator match (90d): @{if(equals(body('Call_Threat_Intel_Module_FileHash')?['results']?[0]?['IsKnownIndicator'], true), 'yes', 'no')}</li>"
+                      },
+                      "runAfter": {
+                        "Call_Threat_Intel_Module_FileHash": [
+                          "Succeeded"
+                        ]
+                      }
+                    },
+                    "Note_Threat_Intel_Failed_FileHash": {
+                      "type": "AppendToArrayVariable",
+                      "inputs": {
+                        "name": "Findings",
+                        "value": "<li>Threat Intelligence module did not complete; its factor was scored as false.</li>"
+                      },
+                      "runAfter": {
+                        "Call_Threat_Intel_Module_FileHash": [
+                          "Failed",
+                          "TimedOut"
+                        ]
+                      }
+                    },
+                    "Call_Related_Alerts_Module_FileHash": {
+                      "type": "ApiConnection",
+                      "inputs": {
+                        "host": {
+                          "connection": {
+                            "name": "@parameters('$connections')['statsecure']['connectionId']"
+                          }
+                        },
+                        "method": "post",
+                        "path": "/Modules/RelatedAlerts",
+                        "body": {
+                          "IncidentARMId": "@body('Call_Base_Module')?['IncidentARMId']",
+                          "Entities": "@body('Call_Base_Module')?['Entities']",
+                          "LookbackDays": "@parameters('RelatedAlertsLookbackDays')"
+                        }
+                      },
+                      "runAfter": {}
+                    },
+                    "Set_RelatedAlertsPresent_FileHash": {
+                      "type": "SetVariable",
+                      "inputs": {
+                        "name": "RelatedAlertsPresent",
+                        "value": "@not(empty(body('Call_Related_Alerts_Module_FileHash')?['results']?[0]?['RelatedAlerts']))"
+                      },
+                      "runAfter": {
+                        "Call_Related_Alerts_Module_FileHash": [
+                          "Succeeded"
+                        ]
+                      }
+                    },
+                    "Finding_Related_Alerts_FileHash": {
+                      "type": "AppendToArrayVariable",
+                      "inputs": {
+                        "name": "Findings",
+                        "value": "<li>Other alerts referencing this entity (last @{body('Call_Related_Alerts_Module_FileHash')?['lookbackDays']} days): @{if(not(empty(body('Call_Related_Alerts_Module_FileHash')?['results']?[0]?['RelatedAlerts'])), 'yes', 'none')}</li>"
+                      },
+                      "runAfter": {
+                        "Call_Related_Alerts_Module_FileHash": [
+                          "Succeeded"
+                        ]
+                      }
+                    },
+                    "Note_Related_Alerts_Failed_FileHash": {
+                      "type": "AppendToArrayVariable",
+                      "inputs": {
+                        "name": "Findings",
+                        "value": "<li>Related Alerts module did not complete; its factor was scored as false.</li>"
+                      },
+                      "runAfter": {
+                        "Call_Related_Alerts_Module_FileHash": [
+                          "Failed",
+                          "TimedOut"
+                        ]
+                      }
+                    }
+                  }
+                },
+                "Case_URL": {
+                  "case": "url",
+                  "actions": {
+                    "Call_Threat_Intel_Module_URL": {
+                      "type": "ApiConnection",
+                      "inputs": {
+                        "host": {
+                          "connection": {
+                            "name": "@parameters('$connections')['statsecure']['connectionId']"
+                          }
+                        },
+                        "method": "post",
+                        "path": "/Modules/ThreatIntel",
+                        "body": "@body('Call_Base_Module')"
+                      },
+                      "runAfter": {}
+                    },
+                    "Set_ThreatIntelMatch_URL": {
+                      "type": "SetVariable",
+                      "inputs": {
+                        "name": "ThreatIntelMatch",
+                        "value": "@equals(body('Call_Threat_Intel_Module_URL')?['results']?[0]?['IsKnownIndicator'], true)"
+                      },
+                      "runAfter": {
+                        "Call_Threat_Intel_Module_URL": [
+                          "Succeeded"
+                        ]
+                      }
+                    },
+                    "Finding_Threat_Intel_URL": {
+                      "type": "AppendToArrayVariable",
+                      "inputs": {
+                        "name": "Findings",
+                        "value": "<li>Active threat intelligence indicator match (90d): @{if(equals(body('Call_Threat_Intel_Module_URL')?['results']?[0]?['IsKnownIndicator'], true), 'yes', 'no')}</li>"
+                      },
+                      "runAfter": {
+                        "Call_Threat_Intel_Module_URL": [
+                          "Succeeded"
+                        ]
+                      }
+                    },
+                    "Note_Threat_Intel_Failed_URL": {
+                      "type": "AppendToArrayVariable",
+                      "inputs": {
+                        "name": "Findings",
+                        "value": "<li>Threat Intelligence module did not complete; its factor was scored as false.</li>"
+                      },
+                      "runAfter": {
+                        "Call_Threat_Intel_Module_URL": [
+                          "Failed",
+                          "TimedOut"
+                        ]
+                      }
+                    }
+                  }
+                }
+              },
+              "default": {
+                "actions": {}
+              },
+              "runAfter": {
+                "Call_Base_Module": [
+                  "Succeeded"
+                ]
+              }
+            },
+            "Call_Risk_Scoring_Module": {
+              "type": "ApiConnection",
+              "inputs": {
+                "host": {
+                  "connection": {
+                    "name": "@parameters('$connections')['statsecure']['connectionId']"
+                  }
+                },
+                "method": "post",
+                "path": "/Modules/RiskScoring",
+                "body": {
+                  "Factors": {
+                    "AadRiskLevelHigh": "@variables('AadRiskLevelHigh')",
+                    "AadRiskLevelMedium": "@variables('AadRiskLevelMedium')",
+                    "ThreatIntelMatch": "@variables('ThreatIntelMatch')",
+                    "UebaHighPriority": "@variables('UebaHighPriority')",
+                    "MdeHighExposure": "@variables('MdeHighExposure')",
+                    "RelatedAlertsPresent": "@variables('RelatedAlertsPresent')"
+                  }
+                }
+              },
+              "runAfter": {
+                "Switch_Entity_Type": [
+                  "Succeeded",
+                  "Failed",
+                  "TimedOut"
+                ]
+              }
+            },
+            "Add_Triage_Comment": {
+              "type": "ApiConnection",
+              "inputs": {
+                "host": {
+                  "connection": {
+                    "name": "@parameters('$connections')['azuresentinel']['connectionId']"
+                  }
+                },
+                "method": "post",
+                "path": "/Incidents/Comment",
+                "body": {
+                  "incidentArmId": "@triggerBody()?['IncidentArmID']",
+                  "message": "<p><b>STAT-Secure entity triage</b> &mdash; @{parameters('EntityType')}: <code>@{replace(replace(replace(string(outputs('Compose_Entity')?['Value']), '&', '&amp;'), '<', '&lt;'), '>', '&gt;')}</code></p><p>Risk band: <b>@{body('Call_Risk_Scoring_Module')?['band']}</b> (score @{body('Call_Risk_Scoring_Module')?['score']}/100). Applied factors: @{join(coalesce(body('Call_Risk_Scoring_Module')?['appliedFactors'], json('[]')), ', ')}</p><ul>@{join(variables('Findings'), '')}</ul><p><i>Run by playbook @{workflow()?['name']}, run @{workflow()?['run']?['name']}.</i></p>"
+                }
+              },
+              "runAfter": {
+                "Call_Risk_Scoring_Module": [
+                  "Succeeded"
+                ]
+              }
+            },
+            "Condition_High_Risk": {
+              "type": "If",
+              "expression": {
+                "and": [
+                  {
+                    "equals": [
+                      "@body('Call_Risk_Scoring_Module')?['band']",
+                      "High"
+                    ]
+                  },
+                  {
+                    "equals": [
+                      "@parameters('RaiseSeverityOnHighRisk')",
+                      true
+                    ]
+                  }
+                ]
+              },
+              "actions": {
+                "Update_Incident_High_Risk": {
+                  "type": "ApiConnection",
+                  "inputs": {
+                    "host": {
+                      "connection": {
+                        "name": "@parameters('$connections')['azuresentinel']['connectionId']"
+                      }
+                    },
+                    "method": "put",
+                    "path": "/Incidents",
+                    "body": {
+                      "incidentArmId": "@triggerBody()?['IncidentArmID']",
+                      "severity": "High",
+                      "tagsToAdd": {
+                        "TagsToAdd": [
+                          {
+                            "Tag": "STAT-Secure-HighRisk"
+                          }
+                        ]
+                      }
+                    }
+                  },
+                  "runAfter": {}
+                }
+              },
+              "else": {
+                "actions": {}
+              },
+              "runAfter": {
+                "Add_Triage_Comment": [
+                  "Succeeded"
+                ]
+              }
+            }
+          },
+          "outputs": {}
+        },
+        "parameters": {
+          "EntityType": {
+            "value": "[variables('statEntityType')]"
+          },
+          "RelatedAlertsLookbackDays": {
+            "value": "[parameters('RelatedAlertsLookbackDays')]"
+          },
+          "RaiseSeverityOnHighRisk": {
+            "value": "[parameters('RaiseSeverityOnHighRisk')]"
+          },
+          "$connections": {
+            "value": {
+              "azuresentinel": {
+                "connectionId": "[resourceId('Microsoft.Web/connections', variables('sentinelConnectionName'))]",
+                "connectionName": "[variables('sentinelConnectionName')]",
+                "id": "[concat('/subscriptions/', subscription().subscriptionId, '/providers/Microsoft.Web/locations/', resourceGroup().location, '/managedApis/azuresentinel')]",
+                "connectionProperties": {
+                  "authentication": {
+                    "type": "ManagedServiceIdentity"
+                  }
+                }
+              },
+              "statsecure": {
+                "connectionId": "[resourceId('Microsoft.Web/connections', parameters('STATConnectionName'))]",
+                "connectionName": "[parameters('STATConnectionName')]",
+                "id": "[resourceId('Microsoft.Web/customApis', parameters('STATConnectionName'))]"
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "outputs": {
+    "logicAppResourceId": {
+      "type": "string",
+      "value": "[resourceId('Microsoft.Logic/workflows', parameters('PlaybookName'))]"
+    },
+    "logicAppPrincipalId": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Logic/workflows', parameters('PlaybookName')), '2019-05-01', 'full').identity.principalId]"
+    }
+  }
+}

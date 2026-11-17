@@ -56,7 +56,10 @@ STAT-Secure/
 │   └── openapi.json
 ├── LogicApp/
 │   ├── azuredeploy.json           (sample end-to-end triage playbook)
-│   └── README.md
+│   ├── README.md
+│   └── EntityTrigger/
+│       ├── azuredeploy.json       (entity-triggered triage playbook, Deploy to Azure)
+│       └── README.md
 ├── Deploy/
 │   ├── main.bicep
 │   └── GrantGraphPermissions.ps1  (run once, manually, by a privileged admin)
@@ -67,7 +70,9 @@ STAT-Secure/
 ## Module coverage
 
 All 12 modules from the original STAT module library are implemented, plus the Base Module
-and a sample Logic App wiring them together:
+and two sample Logic Apps wiring them together: an incident-triggered playbook
+(`LogicApp/azuredeploy.json`) and an entity-triggered playbook
+(`LogicApp/EntityTrigger/`, with a Deploy to Azure button):
 
 | Module | Original purpose | Key security change here |
 |---|---|---|
